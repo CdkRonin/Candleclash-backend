@@ -3,9 +3,10 @@ Oráculo de Precios — CandleClash
 Obtiene variación % a 24h de las 15 criptos y calcula multiplicadores dinámicos.
 Se refresca cada 4 horas. En bear market, las "velas verdes" diarias siguen dando bonos.
 
-Fuente principal: Binance (API pública, sin clave) para las 12 criptos con
-par USDT; XMR/XAG/XAU no están en Binance y siguen por CoinGecko. Si
-Binance no responde en ningún dominio, CoinGecko cubre los 15 como respaldo.
+Fuente principal: Binance (API pública, sin clave) para los 15 linajes;
+el linaje XAU (oro) usa el par PAXGUSDT (PAX Gold, oro tokenizado que
+sigue al oro). Si Binance no responde en ningún dominio, CoinGecko cubre
+los 15 como respaldo.
 """
 
 import asyncio
@@ -33,7 +34,8 @@ class OracleService:
     @staticmethod
     async def _fetch_binance(base_url: str) -> dict:
         """
-        Llama a Binance (ticker 24h) para las 12 criptos con par USDT.
+        Llama a Binance (ticker 24h) para los 15 linajes (XAU vía
+        PAXGUSDT, ver config.py).
         Una sola llamada con symbols=[...]. Retorna el mismo formato que
         CoinGecko: {"BTC": {"price": 61087.42, "change_24h": 0.227}, ...}
         donde change_24h es la variación % a 24h (priceChangePercent).
@@ -122,8 +124,10 @@ class OracleService:
         """
         Orquesta las fuentes del oráculo. Orden de fuentes:
         1. Binance (binance.com, luego binance.us si el primero responde
-           ubicación restringida o falla) para las 12 criptos con par USDT.
-        2. CoinGecko completa los 3 que no están en Binance (XMR, XAG, XAU).
+           ubicación restringida o falla) para los 15 linajes (XAU vía
+           PAXGUSDT).
+        2. Si hay símbolos que solo existen en CoinGecko (COINGECKO_ONLY,
+           hoy vacío), CoinGecko los completa.
         3. Si Binance no responde en ningún dominio, CoinGecko cubre los 15
            como respaldo. Si también falla, se propaga la excepción y
            refresh() conserva los multiplicadores anteriores.
@@ -143,13 +147,18 @@ class OracleService:
                 continue
 
         if binance_base:
-            try:
-                cg = await OracleService._fetch_coingecko(symbols=COINGECKO_ONLY)
-                prices.update(cg)
-                print("[Oracle] fuente: CoinGecko completa XMR/XAG/XAU")
-            except Exception as e:
-                print(f"[Oracle] ⚠ CoinGecko (XMR/XAG/XAU) falló ({e}); "
-                      f"se conservan sus últimos multiplicadores.")
+            if COINGECKO_ONLY:
+                # OJO: _fetch_coingecko([]) pediría los 15 y pisaría los
+                # datos frescos de Binance; con la lista vacía no se pide nada.
+                try:
+                    cg = await OracleService._fetch_coingecko(symbols=COINGECKO_ONLY)
+                    prices.update(cg)
+                    print(f"[Oracle] fuente: CoinGecko completa "
+                          f"{','.join(COINGECKO_ONLY)}")
+                except Exception as e:
+                    print(f"[Oracle] ⚠ CoinGecko ({','.join(COINGECKO_ONLY)}) "
+                          f"falló ({e}); se conservan sus últimos "
+                          f"multiplicadores.")
             return prices
 
         # Sin Binance: CoinGecko para los 15 (propaga la excepción si falla).
@@ -292,6 +301,13 @@ class OracleService:
                 {"$set": {k: v for k, v in doc.items() if k != "_id"}},
                 upsert=True,
             )
+
+        # Limpiar símbolos que ya no son linajes (p. ej. XMR/XAG tras el
+        # cambio a DOT/SUI): si no, /api/oracle/current seguiría listando
+        # docs viejos que ya no se actualizan.
+        await db.oracle_current.delete_many(
+            {"symbol": {"$nin": list(CRYPTO_ATTRIBUTE_MAP)}}
+        )
 
         _oracle_cache = new_multipliers
         _last_update = datetime.utcnow()

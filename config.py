@@ -61,8 +61,10 @@ CRYPTO_ATTRIBUTE_MAP = {
     "TRX":  {"attribute": "def_magica",   "tier": "Comun",      "sensitivity": 0.3},
     "SHIB": {"attribute": "reflejo",      "tier": "Comun",      "sensitivity": 0.3},
     "LTC":  {"attribute": "vel_recup",    "tier": "Comun",      "sensitivity": 0.3},
-    "XMR":  {"attribute": "prob_reflejo", "tier": "Comun",      "sensitivity": 0.2},
-    "XAG":  {"attribute": "prob_bloqueo", "tier": "Comun",      "sensitivity": 0.2},
+    "DOT":  {"attribute": "prob_reflejo", "tier": "Comun",      "sensitivity": 0.2},
+    "SUI":  {"attribute": "prob_bloqueo", "tier": "Comun",      "sensitivity": 0.2},
+    # XAU (oro): su precio en Binance viene de PAXG (PAX Gold, oro
+    # tokenizado que sigue al oro); en CoinGecko el respaldo es "gold".
     "XAU":  {"attribute": "bloqueo",      "tier": "Comun",      "sensitivity": 0.2},
 }
 
@@ -97,17 +99,21 @@ COINGECKO_IDS = {
     "BNB": "binancecoin", "XRP": "ripple", "DOGE": "dogecoin",
     "ADA": "cardano", "LINK": "chainlink", "AVAX": "avalanche-2",
     "TRX": "tron", "SHIB": "shiba-inu", "LTC": "litecoin",
-    "XMR": "monero", "XAG": "silver", "XAU": "gold",
+    "DOT": "polkadot", "SUI": "sui", "XAU": "gold",
 }
 
-# Pares de Binance (USDT) para cada cripto. XMR, XAG y XAU no están en
-# Binance (XMR fue deslistado; XAG/XAU son plata/oro, no criptos) y siguen
-# por CoinGecko (ver COINGECKO_ONLY).
+# Pares de Binance (USDT) para cada cripto. Los 15 linajes ya vienen de
+# Binance: XAU (oro) usa el par PAXGUSDT (PAX Gold, oro tokenizado cuyo
+# precio sigue al oro), porque el oro no cotiza como spot en Binance.
+# Los futuros (perpetuos) NO sirven desde Render (EEUU): fapi.binance.com
+# responde 451 "restricted location", así que oro/plata como perpetuos no
+# son una opción en producción.
 BINANCE_SYMBOLS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
     "BNB": "BNBUSDT", "XRP": "XRPUSDT", "DOGE": "DOGEUSDT",
     "ADA": "ADAUSDT", "LINK": "LINKUSDT", "AVAX": "AVAXUSDT",
     "TRX": "TRXUSDT", "SHIB": "SHIBUSDT", "LTC": "LTCUSDT",
+    "DOT": "DOTUSDT", "SUI": "SUIUSDT", "XAU": "PAXGUSDT",
 }
 
 # Dominios de Binance a probar, en orden. Binance.com restringe IPs de
@@ -116,4 +122,6 @@ BINANCE_SYMBOLS = {
 BINANCE_BASES = ["https://api.binance.com", "https://api.binance.us"]
 
 # Símbolos que solo existen en CoinGecko (no están en BINANCE_SYMBOLS).
-COINGECKO_ONLY = ["XMR", "XAG", "XAU"]
+# Vacío: los 15 linajes ya vienen de Binance; CoinGecko queda solo como
+# respaldo completo de los 15 si Binance no responde.
+COINGECKO_ONLY = []
