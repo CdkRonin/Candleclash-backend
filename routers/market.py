@@ -1,9 +1,23 @@
+import logging
+import random
+import uuid
+
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from pymongo import ReturnDocument
 from routers.auth import get_current_user
 from database import get_db
-from config import settings
+from config import (
+    settings,
+    CRYPTO_ATTRIBUTE_MAP,
+    RACE_MODIFIERS,
+    roll_lineage_tier,
+    roll_rarity,
+)
+from models.gladiator import Gladiator
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -126,3 +140,98 @@ async def sell_tick(req: SellTick, wallet: str = Depends(get_current_user)):
         "$inc": {"tick_balance": -req.tick_amount, "usdt_balance": usdt_received},
     })
     return {"usdt_received": usdt_received, "tick_sold": req.tick_amount}
+
+
+@router.post("/packs/recluta")
+async def claim_starter_pack(wallet: str = Depends(get_current_user)):
+    """Paquete Recluta — PRIMERA VEZ, 1 por cuenta.
+
+    5 NFTs generados EN EL SERVIDOR (sorteos reales de linaje y rareza,
+    los mismos de config.py) + 100 $TICK; el primer NFT nace en Lv25.
+    El reclamo es atómico: find_one_and_update con
+    starter_pack_claimed != True, así dos reclamos simultáneos no
+    pueden colarse. Si ya lo reclamó, 403.
+    Cobro: 15 USDT del saldo del servidor si lo tiene. Si no lo tiene,
+    se permite el reclamo UNA vez como beta (todavía no hay depósitos
+    de donde cobrar) y queda en el log.
+    TODO(depósitos): cuando existan depósitos, el reclamo beta debe
+    desaparecer y el cobro de 15 USDT debe ser obligatorio.
+    """
+    db = get_db()
+    user = await db.users.find_one_and_update(
+        {"wallet_address": wallet.lower(), "starter_pack_claimed": {"$ne": True}},
+        {"$set": {"starter_pack_claimed": True}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not user:
+        raise HTTPException(status_code=403, detail="Ya reclamaste el Paquete Recluta")
+
+    created_ids = []
+    try:
+        # Cobro si hay saldo; si no, reclamo beta (sin depósitos aún).
+        charged_usdt = 0.0
+        if user.get("usdt_balance", 0) >= settings.PACK_RECLUTA_PRICE_USDT:
+            await db.users.update_one(
+                {"wallet_address": wallet.lower()},
+                {"$inc": {"usdt_balance": -settings.PACK_RECLUTA_PRICE_USDT}},
+            )
+            charged_usdt = settings.PACK_RECLUTA_PRICE_USDT
+        else:
+            logger.warning(
+                "Paquete Recluta beta sin cobro para %s "
+                "(saldo USDT %.2f < %.2f; depósitos aún no existen)",
+                wallet.lower(), user.get("usdt_balance", 0),
+                settings.PACK_RECLUTA_PRICE_USDT,
+            )
+
+        # 5 NFTs con los sorteos reales (linaje + rareza independientes).
+        oracle_mults = {}
+        try:
+            from services.oracle_service import OracleService
+            oracle_mults = OracleService.get_cached_multipliers()
+        except Exception:
+            oracle_mults = {}
+        gladiators = []
+        for i in range(settings.PACK_RECLUTA_COUNT):
+            tier = roll_lineage_tier(random.uniform(0, 100))
+            pool = [k for k, v in CRYPTO_ATTRIBUTE_MAP.items() if v["tier"] == tier]
+            lineage = random.choice(pool) if pool else "ADA"
+            race = random.choice(list(RACE_MODIFIERS.keys()))
+            rarity = roll_rarity(random.uniform(0, 100))
+            g = Gladiator(
+                token_id=str(uuid.uuid4()),
+                owner_wallet=wallet.lower(),
+                race=race,
+                lineage=lineage,
+                rarity=rarity,
+                level=25 if i == 0 else 1,  # el primero nace en Lv25
+                xp=0,
+                rebirths=0,
+            )
+            doc = g.model_dump()
+            await db.gladiators.insert_one(doc)
+            created_ids.append(doc["token_id"])
+            doc.pop("_id", None)  # insert_one añade _id (ObjectId); no se serializa
+            gladiators.append({**doc, "computed_stats": g.compute_stats(oracle_mults)})
+
+        await db.users.update_one(
+            {"wallet_address": wallet.lower()},
+            {"$inc": {"tick_balance": settings.PACK_RECLUTA_TICK_BONUS}},
+        )
+    except Exception:
+        # Si algo falló a mitad: devolver el reclamo para no dejar al
+        # usuario marcado sin sus NFTs, y borrar los que sí se crearon.
+        await db.users.update_one(
+            {"wallet_address": wallet.lower()},
+            {"$set": {"starter_pack_claimed": False}},
+        )
+        if created_ids:
+            await db.gladiators.delete_many({"token_id": {"$in": created_ids}})
+        raise
+
+    return {
+        "gladiators": gladiators,
+        "tick_bonus": settings.PACK_RECLUTA_TICK_BONUS,
+        "charged_usdt": charged_usdt,
+        "beta_no_charge": charged_usdt == 0,
+    }

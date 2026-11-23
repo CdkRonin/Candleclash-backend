@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     REBIRTH_COST: int = 100         # $TICK para renacimiento
     MARKET_FEE_PCT: float = 0.05    # 5% plataforma en ventas P2P
 
+    # Paquete Recluta (primera vez, 1 por cuenta): 5 NFTs + 100 $TICK,
+    # el primero en Lv25. El cobro es 15 USDT del saldo del servidor
+    # cuando lo hay; sin depósitos todavía, el reclamo es beta (gratis)
+    # y queda registrado en el log del endpoint.
+    PACK_RECLUTA_PRICE_USDT: float = 15.0
+    PACK_RECLUTA_COUNT: int = 5
+    PACK_RECLUTA_TICK_BONUS: int = 100
+
     # Energía (batallas): tope 10, 1 por batalla, regenera 1 cada 30 min.
     ENERGY_MAX: int = 10
     ENERGY_REGEN_SECONDS: int = 1800
