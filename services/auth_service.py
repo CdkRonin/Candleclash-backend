@@ -18,12 +18,33 @@ def generate_nonce() -> str:
     return secrets.token_hex(16)
 
 
+# Dominio que se muestra en el mensaje de firma. MetaMask (vía Blockaid)
+# marca como sospechosas las firmas de dominios nuevos sin contexto, así
+# que el mensaje debe dejar claro QUÉ se está firmando: solo un login,
+# gratis y sin mover fondos. El nonce es lo que se verifica; el resto del
+# texto es contexto legible para el usuario.
+SIGN_MESSAGE_DOMAIN = "candleclash.vercel.app"
+
+
+def build_login_message(wallet_address: str, nonce: str) -> str:
+    """Mensaje exacto que firma el usuario con MetaMask (EIP-191).
+    Lo usan tanto /nonce (para mostrarlo) como verify_signature
+    (para reconstruirlo): ambos deben coincidir byte a byte."""
+    return (
+        "CandleClash — Inicio de sesión\n"
+        f"Dominio: {SIGN_MESSAGE_DOMAIN}\n"
+        "Esta firma es gratuita: no mueve fondos ni autoriza transacciones.\n"
+        f"Nonce: {nonce}\n"
+        f"Dirección: {wallet_address}"
+    )
+
+
 def verify_signature(wallet_address: str, nonce: str, signature: str) -> bool:
     """
     Verifica que la firma corresponde al wallet_address.
     El usuario firmó el mensaje con MetaMask (EIP-191).
     """
-    message = f"CandleClash Login\nNonce: {nonce}\nDirección: {wallet_address}"
+    message = build_login_message(wallet_address, nonce)
     message_hash = encode_defunct(text=message)
     try:
         recovered = Account.recover_message(message_hash, signature=signature)

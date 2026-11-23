@@ -3,7 +3,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from services.auth_service import (
     generate_nonce, verify_signature, create_jwt,
-    decode_jwt, get_or_create_user,
+    decode_jwt, get_or_create_user, build_login_message,
 )
 from database import get_db
 
@@ -40,7 +40,7 @@ async def get_nonce(wallet_address: str):
     user = await get_or_create_user(wallet_address)
     return {
         "nonce":   user["nonce"],
-        "message": f"CandleClash Login\nNonce: {user['nonce']}\nDirección: {wallet_address}",
+        "message": build_login_message(wallet_address, user["nonce"]),
     }
 
 
@@ -59,6 +59,13 @@ async def login(req: LoginRequest):
 
     if not verify_signature(wallet, req.nonce, req.signature):
         raise HTTPException(status_code=401, detail="Firma inválida")
+
+    # Invalidar el nonce usado: una firma capturada no se puede
+    # reutilizar para sacar otro JWT (el próximo /nonce genera uno nuevo).
+    await db.users.update_one(
+        {"wallet_address": wallet},
+        {"$set": {"nonce": generate_nonce()}},
+    )
 
     token = create_jwt(wallet)
     return {"access_token": token, "token_type": "bearer"}
