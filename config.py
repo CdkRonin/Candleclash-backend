@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     REBIRTH_COST: int = 100         # $TICK para renacimiento
     MARKET_FEE_PCT: float = 0.05    # 5% plataforma en ventas P2P
 
+    # Energía (batallas): tope 10, 1 por batalla, regenera 1 cada 30 min.
+    ENERGY_MAX: int = 10
+    ENERGY_REGEN_SECONDS: int = 1800
+    ENERGY_PER_BATTLE: int = 1
+
     # CORS
     ALLOWED_ORIGINS: List[str] = [
         "https://candleclash.vercel.app",
@@ -125,3 +130,61 @@ BINANCE_BASES = ["https://api.binance.com", "https://api.binance.us"]
 # Vacío: los 15 linajes ya vienen de Binance; CoinGecko queda solo como
 # respaldo completo de los 15 si Binance no responde.
 COINGECKO_ONLY = []
+
+# ── Sorteos de los packs ────────────────────────────────────────────────────
+# Fuente única de verdad para el servidor (el frontend replica estas
+# tablas en RARITY_ROLL / LINEAGE_TIER_ROLL de index.html). Son DOS
+# sorteos independientes por gladiador:
+#   1. RARITY_ROLL: la rareza del gladiador (qué tan fuerte es).
+#   2. LINEAGE_TIER_ROLL: el tier del linaje (qué cripto sale).
+# Las probabilidades de cada tabla suman 100. El pack Batallón garantiza
+# 1 NFT de rareza Plata o mejor (sorteo restringido a Plata+).
+# El mint gratis NO usa estas tablas: los reclutas gratis son Cobre Lv1.
+RARITY_ROLL = [
+    ("Cobre", 65.0),
+    ("Bronce", 25.0),
+    ("Plata", 7.0),
+    ("Oro", 2.0),
+    ("Diamante", 0.8),
+    ("Legendario", 0.2),
+]
+
+LINEAGE_TIER_ROLL = [
+    ("Comun", 65.0),
+    ("Epico", 25.0),
+    ("Legendario", 10.0),
+]
+
+
+def roll_from_table(table, value: float) -> str:
+    """Devuelve el ítem cuya probabilidad acumulada cubre `value` (0–100).
+
+    Ej.: RARITY_ROLL con value=66 → Bronce (65–90); con 99.9 → Legendario.
+    Si el valor cae fuera por redondeo, devuelve el último ítem.
+    """
+    acc = 0.0
+    for name, pct in table:
+        acc += pct
+        if value < acc:
+            return name
+    return table[-1][0]
+
+
+def roll_rarity(value: float) -> str:
+    """Rareza sorteada para un gladiador de pack (value: 0–100)."""
+    return roll_from_table(RARITY_ROLL, value)
+
+
+def roll_rarity_plata_plus(value: float) -> str:
+    """Rareza sorteada restringida a Plata o mejor (value: 0–10, pesos
+    relativos de la tabla: Plata 7, Oro 2, Diamante 0.8, Legendario 0.2).
+    Es la garantía del pack Batallón."""
+    return roll_from_table(
+        [("Plata", 7.0), ("Oro", 2.0), ("Diamante", 0.8), ("Legendario", 0.2)],
+        value,
+    )
+
+
+def roll_lineage_tier(value: float) -> str:
+    """Tier de linaje sorteado (value: 0–100)."""
+    return roll_from_table(LINEAGE_TIER_ROLL, value)

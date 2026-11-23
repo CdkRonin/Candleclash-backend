@@ -82,6 +82,8 @@ async def get_or_create_user(wallet_address: str) -> dict:
             "league":         "Liga Bronce",
             "wins":           0,
             "losses":         0,
+            "energy":         settings.ENERGY_MAX,  # 10: empieza lleno
+            "energy_updated_at": datetime.utcnow(),
             "created_at":     datetime.utcnow(),
             "last_login":     datetime.utcnow(),
             "nonce":          generate_nonce(),

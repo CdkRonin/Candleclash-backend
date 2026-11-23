@@ -5,6 +5,7 @@ from services.auth_service import (
     generate_nonce, verify_signature, create_jwt,
     decode_jwt, get_or_create_user, build_login_message,
 )
+from services.energy_service import refresh_energy
 from database import get_db
 
 router = APIRouter()
@@ -73,9 +74,13 @@ async def login(req: LoginRequest):
 
 @router.get("/me")
 async def get_me(wallet: str = Depends(get_current_user)):
-    """Retorna el perfil del usuario autenticado."""
+    """Retorna el perfil del usuario autenticado, con su energía
+    actualizada (regeneración calculada al leer)."""
     db = get_db()
     user = await db.users.find_one({"wallet_address": wallet}, {"_id": 0, "nonce": 0})
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    energy = await refresh_energy(db, wallet)
+    user["energy"] = energy["energy"]
+    user["energy_next_in_min"] = energy["minutes_to_next"]
     return user
