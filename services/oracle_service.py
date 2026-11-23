@@ -2,13 +2,21 @@
 Oráculo de Precios — CandleClash
 Obtiene variación % a 24h de las 15 criptos y calcula multiplicadores dinámicos.
 Se refresca cada 4 horas. En bear market, las "velas verdes" diarias siguen dando bonos.
+
+Fuente principal: Binance (API pública, sin clave) para las 12 criptos con
+par USDT; XMR/XAG/XAU no están en Binance y siguen por CoinGecko. Si
+Binance no responde en ningún dominio, CoinGecko cubre los 15 como respaldo.
 """
 
 import asyncio
+import json
 import httpx
 from datetime import datetime
 from database import get_db
-from config import settings, CRYPTO_ATTRIBUTE_MAP, COINGECKO_IDS
+from config import (
+    settings, CRYPTO_ATTRIBUTE_MAP, COINGECKO_IDS,
+    BINANCE_SYMBOLS, BINANCE_BASES, COINGECKO_ONLY,
+)
 
 # Cache en memoria para no golpear MongoDB en cada batalla
 _oracle_cache: dict = {}   # {"BTC": 1.03, "ETH": 0.97, ...}
@@ -23,12 +31,57 @@ class OracleService:
         return dict(_oracle_cache) if _oracle_cache else {k: 1.0 for k in CRYPTO_ATTRIBUTE_MAP}
 
     @staticmethod
-    async def fetch_prices() -> dict:
+    async def _fetch_binance(base_url: str) -> dict:
+        """
+        Llama a Binance (ticker 24h) para las 12 criptos con par USDT.
+        Una sola llamada con symbols=[...]. Retorna el mismo formato que
+        CoinGecko: {"BTC": {"price": 61087.42, "change_24h": 0.227}, ...}
+        donde change_24h es la variación % a 24h (priceChangePercent).
+        Lanza excepción si el dominio falla (451 ubicación restringida,
+        429, timeout, red) para que el llamador pruebe la siguiente fuente.
+        """
+        pairs = list(BINANCE_SYMBOLS.values())
+        url = f"{base_url}/api/v3/ticker/24hr"
+        params = {"symbols": json.dumps(pairs)}
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if isinstance(data, dict):
+            # Binance.com desde IP restringida (EEUU) puede responder con
+            # {"code": 0, "msg": "Service unavailable from a restricted
+            # location..."} en vez de la lista de tickers.
+            raise ValueError(
+                f"Binance {base_url} restringido: {data.get('msg', data)}"
+            )
+
+        reverse_map = {v: k for k, v in BINANCE_SYMBOLS.items()}
+        result = {}
+        for item in data:
+            symbol = reverse_map.get(item.get("symbol"))
+            if not symbol:
+                continue
+            try:
+                change = float(item.get("priceChangePercent"))
+                price = float(item.get("lastPrice"))
+            except (TypeError, ValueError):
+                # Dato inválido: se deja en None y refresh() conserva el
+                # último multiplicador bueno de ese cripto.
+                change, price = None, None
+            result[symbol] = {"price": price, "change_24h": change}
+        return result
+
+    @staticmethod
+    async def _fetch_coingecko(symbols: list | None = None) -> dict:
         """
         Llama a CoinGecko para obtener precios y variación a 24h.
-        Retorna: {"BTC": {"price": 68000, "change_24h": 2.4}, ...}
+        symbols: subconjunto a pedir (None = los 15). Retorna:
+        {"BTC": {"price": 68000, "change_24h": 2.4}, ...}
         """
-        ids = ",".join(COINGECKO_IDS.values())
+        wanted = symbols or list(COINGECKO_IDS)
+        ids = ",".join(COINGECKO_IDS[s] for s in wanted)
         url = "https://api.coingecko.com/api/v3/simple/price"
         params = {
             "ids": ids,
@@ -58,6 +111,45 @@ class OracleService:
                     "change_24h": values.get("usd_24h_change"),
                 }
         return result
+
+    @staticmethod
+    async def fetch_prices() -> dict:
+        """
+        Orquesta las fuentes del oráculo. Orden de fuentes:
+        1. Binance (binance.com, luego binance.us si el primero responde
+           ubicación restringida o falla) para las 12 criptos con par USDT.
+        2. CoinGecko completa los 3 que no están en Binance (XMR, XAG, XAU).
+        3. Si Binance no responde en ningún dominio, CoinGecko cubre los 15
+           como respaldo. Si también falla, se propaga la excepción y
+           refresh() conserva los multiplicadores anteriores.
+        Retorna: {"BTC": {"price": ..., "change_24h": ...}, ...}
+        """
+        prices = {}
+        binance_base = None
+        for base in BINANCE_BASES:
+            try:
+                prices = await OracleService._fetch_binance(base)
+                binance_base = base
+                print(f"[Oracle] fuente: Binance ({base}) — "
+                      f"{len(prices)} símbolos")
+                break
+            except Exception as e:
+                print(f"[Oracle] ⚠ Binance {base} no disponible ({e})")
+                continue
+
+        if binance_base:
+            try:
+                cg = await OracleService._fetch_coingecko(symbols=COINGECKO_ONLY)
+                prices.update(cg)
+                print("[Oracle] fuente: CoinGecko completa XMR/XAG/XAU")
+            except Exception as e:
+                print(f"[Oracle] ⚠ CoinGecko (XMR/XAG/XAU) falló ({e}); "
+                      f"se conservan sus últimos multiplicadores.")
+            return prices
+
+        # Sin Binance: CoinGecko para los 15 (propaga la excepción si falla).
+        print("[Oracle] fuente: CoinGecko (respaldo, Binance no disponible)")
+        return await OracleService._fetch_coingecko()
 
     @staticmethod
     def _as_number(value):
@@ -107,8 +199,8 @@ class OracleService:
         """
         Actualiza precios y guarda en MongoDB + cache en memoria.
 
-        Robusto ante fallos de CoinGecko:
-        - Si la llamada falla (429, timeout, red), NO se toca nada: se
+        Robusto ante fallos de las fuentes (Binance / CoinGecko):
+        - Si la llamada falla (429, 451, timeout, red), NO se toca nada: se
           conservan los multiplicadores anteriores y se registra un warning.
         - Si un cripto viene sin precio/cambio 24h válido (None o ausente),
           se salta SOLO ese cripto y conserva su último multiplicador bueno
@@ -122,8 +214,8 @@ class OracleService:
         try:
             prices = await OracleService.fetch_prices()
         except Exception as e:
-            # 429 de CoinGecko, timeout o error de red: no romper nada.
-            print(f"[Oracle] ⚠ CoinGecko no respondió ({e}). "
+            # 429/451, timeout o error de red en todas las fuentes: no romper nada.
+            print(f"[Oracle] ⚠ Ninguna fuente respondió ({e}). "
                   f"Se conservan los multiplicadores anteriores.")
             if not _oracle_cache:
                 # Arranque en frío tras reinicio: intentar recuperar el último
@@ -160,8 +252,8 @@ class OracleService:
                 kept = previous.get(symbol, 1.0)
                 new_multipliers[symbol] = kept
                 skipped.append(symbol)
-                print(f"[Oracle] ⚠ {symbol}: sin cambio 24h válido de "
-                      f"CoinGecko, se conserva multiplicador {kept}")
+                print(f"[Oracle] ⚠ {symbol}: sin cambio 24h válido, "
+                      f"se conserva multiplicador {kept}")
                 continue
 
             mult = OracleService.calculate_multiplier(change, cfg["sensitivity"])

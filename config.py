@@ -99,3 +99,21 @@ COINGECKO_IDS = {
     "TRX": "tron", "SHIB": "shiba-inu", "LTC": "litecoin",
     "XMR": "monero", "XAG": "silver", "XAU": "gold",
 }
+
+# Pares de Binance (USDT) para cada cripto. XMR, XAG y XAU no están en
+# Binance (XMR fue deslistado; XAG/XAU son plata/oro, no criptos) y siguen
+# por CoinGecko (ver COINGECKO_ONLY).
+BINANCE_SYMBOLS = {
+    "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
+    "BNB": "BNBUSDT", "XRP": "XRPUSDT", "DOGE": "DOGEUSDT",
+    "ADA": "ADAUSDT", "LINK": "LINKUSDT", "AVAX": "AVAXUSDT",
+    "TRX": "TRXUSDT", "SHIB": "SHIBUSDT", "LTC": "LTCUSDT",
+}
+
+# Dominios de Binance a probar, en orden. Binance.com restringe IPs de
+# EEUU (Render está en Virginia) con 451 "restricted location"; en ese
+# caso se prueba Binance.us, que tiene el mismo formato de respuesta.
+BINANCE_BASES = ["https://api.binance.com", "https://api.binance.us"]
+
+# Símbolos que solo existen en CoinGecko (no están en BINANCE_SYMBOLS).
+COINGECKO_ONLY = ["XMR", "XAG", "XAU"]
