@@ -32,7 +32,8 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
         first_is_p1 = first is attacker
 
         def attack(att, dfn, hp_att, hp_dfn):
-            crit   = random.random() < dfn.get("prob_critico", 0.15)    # del atacante
+            # El crítico es del atacante; el bloqueo y el reflejo son del defensor.
+            crit   = random.random() < att.get("prob_critico", 0.15)
             block  = random.random() < dfn.get("prob_bloqueo", 0.10)
             reflect = random.random() < dfn.get("prob_reflejo", 0.08)
 
@@ -88,7 +89,7 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
         "winner":   winner,
         "p1_hp_left": p1_hp,
         "p2_hp_left": p2_hp,
-        "rounds":   len([r for r in log if r.get("round", 0) > 0]),
+        "rounds":   max((r["round"] for r in log), default=0),
     }, log
 
 

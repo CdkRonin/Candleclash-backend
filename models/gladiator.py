@@ -103,6 +103,8 @@ class Gladiator(BaseModel):
             return round(min(cap, val * mult), 3)
 
         return {
+            "race":         self.race,
+            "lineage":      self.lineage,
             "vida":         apply(base.vida,         "vida",         lineage_attr == "vida"),
             "atq_fisico":   apply(base.atq_fisico,   "atq_fisico",   lineage_attr == "atq_fisico"),
             "defensa":      apply(base.defensa,       "defensa",       lineage_attr == "defensa") if self.level >= 10 else 0,
