@@ -42,7 +42,12 @@ class OracleService:
         """
         pairs = list(BINANCE_SYMBOLS.values())
         url = f"{base_url}/api/v3/ticker/24hr"
-        params = {"symbols": json.dumps(pairs)}
+        # OJO: json.dumps por defecto mete un espacio tras cada coma
+        # ('["BTCUSDT", "ETHUSDT"]') y httpx lo codifica como %20; el
+        # validador de Binance rechaza el espacio con 400 "Illegal
+        # characters found in parameter 'symbols'". JSON compacto, sin
+        # espacios, es la forma que Binance acepta.
+        params = {"symbols": json.dumps(pairs, separators=(",", ":"))}
 
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url, params=params)
