@@ -66,6 +66,31 @@ CRYPTO_ATTRIBUTE_MAP = {
     "XAU":  {"attribute": "bloqueo",      "tier": "Comun",      "sensitivity": 0.2},
 }
 
+# ── Modificadores por raza ──────────────────────────────────────────────────
+# Cada raza sube 2 stats y baja 1, para que ninguna domine en todo y cada
+# jugador pueda armar su build. Los valores son multiplicadores sobre el stat
+# base (1.20 = +20%, 0.90 = -10%). Humano es la excepción equilibrada.
+# Las claves deben coincidir exactamente con los nombres de raza del frontend.
+# Los stats no listados quedan en 1.0 (sin cambio). Una raza desconocida
+# queda en 1.0 en todo, así los gladiadores viejos siguen funcionando.
+RACE_MODIFIERS = {
+    "Humano":     {"vida": 1.10, "atq_fisico": 1.10, "vel_ataque": 0.95},
+    "Elfo":       {"vel_ataque": 1.20, "prob_critico": 1.20, "vida": 0.90},
+    "Enano":      {"defensa": 1.20, "bloqueo": 1.20, "vel_ataque": 0.90},
+    "Orco":       {"atq_fisico": 1.20, "vida": 1.15, "def_magica": 0.90},
+    "Goblin":     {"prioridad": 1.20, "critico": 1.20, "defensa": 0.90},
+    "Mediano":    {"prob_reflejo": 1.20, "vel_recup": 1.15, "atq_fisico": 0.90},
+    "Gnomo":      {"atq_magico": 1.20, "prob_critico": 1.10, "vida": 0.90},
+    "Dracónido":  {"atq_fisico": 1.15, "atq_magico": 1.15, "vel_ataque": 0.90},
+    "Tiefling":   {"atq_magico": 1.20, "critico": 1.15, "defensa": 0.90},
+    "H.Lagarto":  {"recuperacion": 1.20, "vel_recup": 1.15, "atq_magico": 0.90},
+    "Tabaxi":     {"vel_ataque": 1.20, "prioridad": 1.15, "defensa": 0.90},
+    "Minotauro":  {"vida": 1.20, "atq_fisico": 1.10, "vel_ataque": 0.90},
+    "Forjado":    {"defensa": 1.20, "vida": 1.10, "vel_recup": 0.90},
+    "Cíborg":     {"prob_bloqueo": 1.20, "defensa": 1.10, "recuperacion": 0.90},
+    "Alienígena": {"atq_magico": 1.15, "reflejo": 1.20, "atq_fisico": 0.90},
+}
+
 # IDs de CoinGecko para cada cripto
 COINGECKO_IDS = {
     "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
