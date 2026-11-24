@@ -27,6 +27,20 @@ class RebirthRequest(BaseModel):
     sacrifice_id: str
 
 
+async def _log_forge_action(db, wallet: str, action: str):
+    """Registro mínimo para la misión diaria 'Usar la Forja': el
+    servidor verifica con sus propios datos, no con lo que diga el
+    cliente. Es un log secundario: si falla no debe romper la forja."""
+    try:
+        await db.forge_actions.insert_one({
+            "wallet_address": wallet,
+            "action": action,
+            "timestamp": datetime.utcnow(),
+        })
+    except Exception:
+        pass
+
+
 @router.post("/ascend")
 async def ascend(req: AscendRequest, wallet: str = Depends(get_current_user)):
     """Funde 4 NFTs idénticos para subir rareza. Cuesta 50 $TICK."""
@@ -75,6 +89,7 @@ async def ascend(req: AscendRequest, wallet: str = Depends(get_current_user)):
         {"token_id": req.main_id},
         {"$set": {"rarity": next_rarity, "updated_at": datetime.utcnow()}},
     )
+    await _log_forge_action(db, wallet, "ascend")
     return {"success": True, "new_rarity": next_rarity, "tick_spent": settings.FORGE_ASCEND_COST}
 
 
@@ -124,6 +139,7 @@ async def feed(req: FeedRequest, wallet: str = Depends(get_current_user)):
         {"token_id": req.main_id},
         {"$set": {"xp": new_xp, "level": new_level, "updated_at": datetime.utcnow()}},
     )
+    await _log_forge_action(db, wallet, "feed")
     return {"success": True, "xp_gained": total_xp, "new_level": new_level, "new_xp": new_xp}
 
 
@@ -165,6 +181,7 @@ async def rebirth(req: RebirthRequest, wallet: str = Depends(get_current_user)):
         {"token_id": req.main_id},
         {"$set": {"level": 1, "xp": 0, "rebirths": new_rebirths, "updated_at": datetime.utcnow()}},
     )
+    await _log_forge_action(db, wallet, "rebirth")
     return {
         "success":     True,
         "rebirths":    new_rebirths,

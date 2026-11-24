@@ -14,6 +14,12 @@ async def connect_db():
     await db.gladiators.create_index([("owner_wallet", 1), ("token_id", 1)])
     await db.market_listings.create_index("status")
     await db.oracle_snapshots.create_index([("symbol", 1), ("timestamp", -1)])
+    # Misiones diarias: reclamo único por wallet+misión+día (UTC) y
+    # verificación de progreso con datos del servidor.
+    await db.mission_claims.create_index(
+        [("wallet_address", 1), ("mission_id", 1), ("date", 1)], unique=True)
+    await db.forge_actions.create_index([("wallet_address", 1), ("timestamp", -1)])
+    await db.battles.create_index([("player_wallet", 1), ("timestamp", -1)])
     print("✅ MongoDB conectado")
 
 

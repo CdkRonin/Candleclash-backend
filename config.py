@@ -39,6 +39,20 @@ class Settings(BaseSettings):
     PACK_RECLUTA_COUNT: int = 5
     PACK_RECLUTA_TICK_BONUS: int = 100
 
+    # Misiones diarias (día UTC, como el resto del servidor).
+    # 'verified': True = el servidor comprueba el progreso con sus
+    # propios datos antes de pagar. 'boxes' es False: las cajas
+    # Básica/Escuadrón/Batallón siguen siendo DEMO (no hay endpoint
+    # de cajas), así que no hay nada que verificar en el servidor;
+    # su premio se reclama una vez al día por confianza (beta) y se
+    # verificará cuando las cajas sean reales.
+    MISSIONS: dict = {
+        "battles": {"label": "Ganar 3 batallas", "target": 3, "reward": 10, "verified": True},
+        "boxes":   {"label": "Abrir 1 caja",     "target": 1, "reward": 5,  "verified": False,
+                    "note": "Beta: las cajas aún son demo; el reclamo es por confianza hasta que las cajas sean reales."},
+        "forge":   {"label": "Usar la Forja",    "target": 1, "reward": 15, "verified": True},
+    }
+
     # Energía (batallas): tope 10, 1 por batalla, regenera 1 cada 30 min.
     ENERGY_MAX: int = 10
     ENERGY_REGEN_SECONDS: int = 1800
