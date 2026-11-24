@@ -210,3 +210,43 @@ def roll_rarity_plata_plus(value: float) -> str:
 def roll_lineage_tier(value: float) -> str:
     """Tier de linaje sorteado (value: 0–100)."""
     return roll_from_table(LINEAGE_TIER_ROLL, value)
+
+
+# ── Habilidades por raza ────────────────────────────────────────────────────
+# UNA habilidad por raza, en la batalla automática. La activa el servidor
+# solo, cuando el enfriamiento está listo (ver services/battle_service.py).
+# Regla simple: al empezar la batalla el enfriamiento es 0, así que la
+# habilidad se dispara en el primer ataque de la ronda 1; después se
+# dispara cada `cooldown` rondas (p. ej. cooldown 4 → rondas 1, 5, 9…).
+# Efectos (kinds): damage_mult (daño ×value en ese ataque), crit (ese
+# ataque siempre es crítico), heal (cura value × vida máxima), block
+# (bloquea por completo el próximo ataque enemigo), extra_attack (un
+# ataque más en la misma ronda), reduce (el próximo ataque enemigo hace
+# (1 − value) de daño). Balance: daño de habilidad como mucho ×1.5 en
+# una ronda y curación como mucho 15% de la vida máxima; los dos
+# gladiadores tienen una habilidad cada uno, así que es simétrico.
+# El frontend replica esta tabla SOLO para mostrarla y para la batalla
+# demo de invitado; en batallas reales manda el servidor.
+RACE_ABILITIES = {
+    "Humano":     {"id": "golpe_decisivo",     "nombre": "Golpe Decisivo",     "descripcion": "Un golpe certero con +40% de daño.",              "kind": "damage_mult",  "value": 1.4,  "cooldown": 4},
+    "Elfo":       {"id": "tiro_certero",       "nombre": "Tiro Certero",       "descripcion": "El próximo ataque siempre es crítico.",            "kind": "crit",         "value": None, "cooldown": 4},
+    "Enano":      {"id": "muro_piedra",        "nombre": "Muro de Piedra",     "descripcion": "Bloquea por completo el próximo ataque enemigo.",  "kind": "block",        "value": None, "cooldown": 4},
+    "Orco":       {"id": "furia_salvaje",      "nombre": "Furia Salvaje",      "descripcion": "Daño ×1.5 en el próximo ataque.",                  "kind": "damage_mult",  "value": 1.5,  "cooldown": 5},
+    "Goblin":     {"id": "punalada_rapida",    "nombre": "Puñalada Rápida",    "descripcion": "Ataca una vez más en esta misma ronda.",           "kind": "extra_attack", "value": None, "cooldown": 5},
+    "Mediano":    {"id": "suerte_mediana",     "nombre": "Suerte Mediana",     "descripcion": "Recupera 10% de su vida máxima.",                  "kind": "heal",         "value": 0.10, "cooldown": 4},
+    "Gnomo":      {"id": "chispa_arcana",      "nombre": "Chispa Arcana",      "descripcion": "Daño mágico: +40% de daño en el próximo ataque.",  "kind": "damage_mult",  "value": 1.4,  "cooldown": 4},
+    "Dracónido":  {"id": "aliento_dragon",     "nombre": "Aliento de Dragón",  "descripcion": "Daño ×1.5 en el próximo ataque.",                  "kind": "damage_mult",  "value": 1.5,  "cooldown": 5},
+    "Tiefling":   {"id": "pacto_infernal",     "nombre": "Pacto Infernal",     "descripcion": "El próximo ataque siempre es crítico.",            "kind": "crit",         "value": None, "cooldown": 4},
+    "H.Lagarto":  {"id": "regeneracion",       "nombre": "Regeneración",       "descripcion": "Recupera 15% de su vida máxima.",                  "kind": "heal",         "value": 0.15, "cooldown": 5},
+    "Tabaxi":     {"id": "zarpazo_doble",      "nombre": "Zarpazo Doble",      "descripcion": "Ataca una vez más en esta misma ronda.",           "kind": "extra_attack", "value": None, "cooldown": 5},
+    "Minotauro":  {"id": "embestida",          "nombre": "Embestida",          "descripcion": "Daño ×1.5 en el próximo ataque.",                  "kind": "damage_mult",  "value": 1.5,  "cooldown": 5},
+    "Forjado":    {"id": "armadura_reforzada", "nombre": "Armadura Reforzada", "descripcion": "El próximo ataque enemigo hace la mitad de daño.", "kind": "reduce",       "value": 0.5,  "cooldown": 4},
+    "Cíborg":     {"id": "escudo_energia",     "nombre": "Escudo de Energía",  "descripcion": "Bloquea por completo el próximo ataque enemigo.",  "kind": "block",        "value": None, "cooldown": 4},
+    "Alienígena": {"id": "mente_colmena",      "nombre": "Mente Colmena",      "descripcion": "Recupera 10% de su vida máxima.",                  "kind": "heal",         "value": 0.10, "cooldown": 4},
+}
+
+
+def ability_for_race(race: str) -> dict:
+    """Habilidad de una raza (RACE_ABILITIES). Raza desconocida →
+    la de Humano, para que los gladiadores viejos sigan funcionando."""
+    return RACE_ABILITIES.get(race, RACE_ABILITIES["Humano"])

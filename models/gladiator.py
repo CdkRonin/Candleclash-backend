@@ -36,6 +36,7 @@ class Gladiator(BaseModel):
     """Documento MongoDB para cada NFT gladiador."""
     token_id:      str             # ID único en el contrato ERC-721
     owner_wallet:  str             # Dirección del dueño
+    name:          Optional[str] = None  # Nombre elegido en el creador (máx. 20 caracteres); None = sin nombre
     race:          str             # Raza (Humano, Orco, etc.)
     lineage:       str             # Cripto linaje (BTC, ETH, etc.)
     rarity:        Rarity = Rarity.COBRE
@@ -52,6 +53,19 @@ class Gladiator(BaseModel):
         if self.level >= 50:
             return 0
         return int(80 * (self.level ** 1.35))
+
+    def display_name(self) -> str:
+        """Nombre que se muestra: el elegido en el creador, o por defecto
+        raza + linaje (p. ej. "Orco · BTC"). Los gladiadores viejos sin
+        nombre (name=None) usan el nombre por defecto, sin migrar datos."""
+        if self.name and self.name.strip():
+            return self.name.strip()
+        return f"{self.race} · {self.lineage}"
+
+    def ability_info(self) -> dict:
+        """Habilidad de la raza de este gladiador (ver config.RACE_ABILITIES)."""
+        from config import ability_for_race
+        return ability_for_race(self.race)
 
     def rarity_multiplier(self) -> float:
         return {

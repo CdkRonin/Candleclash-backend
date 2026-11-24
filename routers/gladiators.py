@@ -17,9 +17,35 @@ FREE_MINT_LIMIT = 2
 
 
 class MintRequest(BaseModel):
-    """Raza y linaje opcionales: si no se mandan, se sortean."""
+    """Raza y linaje opcionales: si no se mandan, se sortean.
+    Nombre opcional del creador: se recortan espacios, máximo 20
+    caracteres; vacío o ausente → None (nombre por defecto)."""
     race:    Optional[str] = None
     lineage: Optional[str] = None
+    name:    Optional[str] = None
+
+
+def serialize_gladiator(doc: dict, oracle_mults: dict) -> dict:
+    """Gladiador listo para el frontend: doc + stats calculados +
+    display_name (nombre elegido o "Raza · Linaje" por defecto) +
+    ability (habilidad de su raza, fuente de verdad del servidor).
+    Los docs viejos sin campo `name` funcionan igual (name=None)."""
+    g = Gladiator(**doc)
+    return {
+        **doc,
+        "computed_stats": g.compute_stats(oracle_mults),
+        "display_name": g.display_name(),
+        "ability": g.ability_info(),
+    }
+
+
+def sanitize_name(raw: Optional[str]) -> Optional[str]:
+    """Nombre del creador: sin espacios de más, como mucho 20
+    caracteres; vacío o ausente → None."""
+    if not raw:
+        return None
+    name = raw.strip()[:20].strip()
+    return name or None
 
 
 @router.post("/mint")
@@ -55,6 +81,7 @@ async def mint_gladiator(req: MintRequest, wallet: str = Depends(get_current_use
     g = Gladiator(
         token_id=str(uuid.uuid4()),
         owner_wallet=wallet.lower(),
+        name=sanitize_name(req.name),
         race=race,
         lineage=lineage,
         rarity=Rarity.COBRE,
@@ -66,7 +93,7 @@ async def mint_gladiator(req: MintRequest, wallet: str = Depends(get_current_use
     await db.gladiators.insert_one(doc)
     doc.pop("_id", None)  # insert_one añade _id (ObjectId) al dict; no se serializa a JSON
     oracle_mults = OracleService.get_cached_multipliers()
-    return {**doc, "computed_stats": g.compute_stats(oracle_mults)}
+    return serialize_gladiator(doc, oracle_mults)
 
 
 @router.get("/my")
@@ -83,11 +110,7 @@ async def get_my_gladiators(wallet: str = Depends(get_current_user)):
 
     result = []
     for doc in docs:
-        g = Gladiator(**doc)
-        result.append({
-            **doc,
-            "computed_stats": g.compute_stats(oracle_mults),
-        })
+        result.append(serialize_gladiator(doc, oracle_mults))
     return result
 
 
@@ -102,5 +125,4 @@ async def get_gladiator(token_id: str, wallet: str = Depends(get_current_user)):
     )
     if not doc:
         raise HTTPException(status_code=404, detail="Gladiador no encontrado")
-    g = Gladiator(**doc)
-    return {**doc, "computed_stats": g.compute_stats(oracle_mults)}
+    return serialize_gladiator(doc, oracle_mults)

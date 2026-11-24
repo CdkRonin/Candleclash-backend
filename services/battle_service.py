@@ -8,6 +8,7 @@ import random
 from datetime import datetime
 from models.gladiator import Gladiator
 from services.oracle_service import OracleService
+from config import ability_for_race
 from database import get_db
 
 
@@ -28,41 +29,119 @@ def _opp_rarity_pool(player_rarity: str) -> list:
     return pool + pool[:-1] if len(pool) > 1 else pool
 
 
+def _fighter_state(stats: dict, is_p1: bool) -> dict:
+    """Estado de un luchador en la batalla: stats, habilidad de su raza
+    (config.RACE_ABILITIES) y enfriamiento. El enfriamiento empieza en 0,
+    así que la habilidad se dispara en el primer ataque de la ronda 1."""
+    return {
+        "stats": stats,
+        "is_p1": is_p1,
+        "cd": 0,
+        "block_next": False,   # la habilidad de bloqueo protege del próximo ataque
+        "reduce_next": False,  # la habilidad de reducción amortigua el próximo ataque
+        "ability": ability_for_race(stats.get("race", "Humano")),
+        "max_hp": stats["vida"],
+    }
+
+
 def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
     """
     Simula una batalla completa entre dos gladiadores (stats ya computados).
     Retorna (resultado_dict, log_de_rondas).
+
+    Habilidades (una por raza, ver config.RACE_ABILITIES): se disparan
+    automáticamente en el primer ataque de la ronda en que el
+    enfriamiento está listo (rondas 1, 1+cooldown, 1+2*cooldown…).
+    El efecto se aplica en el servidor y queda en el log con
+    type "ability" (nombre de la habilidad, quién la usó y su efecto).
+    La batalla sigue siendo automática: el jugador no decide nada.
     """
+    p1 = _fighter_state(attacker, True)
+    p2 = _fighter_state(defender, False)
     p1_hp = attacker["vida"]
     p2_hp = defender["vida"]
     log = []
 
-    for rnd in range(1, MAX_ROUNDS + 1):
-        # Orden de ataque: mayor vel_ataque va primero
-        first = attacker if attacker["vel_ataque"] >= defender["vel_ataque"] else defender
-        second = defender if first is attacker else attacker
-        first_is_p1 = first is attacker
+    def ability_entry(rnd, att, ability, **extra):
+        entry = {
+            "round": rnd,
+            "type": "ability",
+            "attacker": att["stats"]["race"],
+            "ability": ability["nombre"],
+            "ability_id": ability["id"],
+            "effect": ability["kind"],
+            "value": ability["value"],
+        }
+        entry.update(extra)
+        log.append(entry)
 
-        def attack(att, dfn, hp_att, hp_dfn):
+    def attack(att, dfn, hp_att, hp_dfn, allow_ability=True):
+        """Un ataque de `att` contra `dfn`. Devuelve (hp_att, hp_dfn).
+        Si la habilidad es de ataque extra, ataca dos veces en la ronda
+        (el segundo golpe no vuelve a disparar la habilidad)."""
+        rnd = battle_round[0]
+        force_crit = False
+        dmg_mult = 1.0
+        extra = False
+
+        # Habilidad: se dispara al atacar, si el enfriamiento está listo.
+        if allow_ability and att["cd"] == 0:
+            ability = att["ability"]
+            att["cd"] = ability["cooldown"]
+            kind = ability["kind"]
+            if kind == "heal":
+                amount = min(int(att["max_hp"] * ability["value"]),
+                             att["max_hp"] - hp_att)
+                hp_att = min(att["max_hp"], hp_att + amount)
+                ability_entry(rnd, att, ability, healed=amount)
+            elif kind == "block":
+                att["block_next"] = True
+                ability_entry(rnd, att, ability)
+            elif kind == "reduce":
+                att["reduce_next"] = True
+                ability_entry(rnd, att, ability)
+            elif kind == "crit":
+                force_crit = True
+                ability_entry(rnd, att, ability)
+            elif kind == "damage_mult":
+                dmg_mult = ability["value"]
+                ability_entry(rnd, att, ability)
+            elif kind == "extra_attack":
+                extra = True
+                ability_entry(rnd, att, ability)
+
+        def strike(hp_att, hp_dfn, force_crit, dmg_mult):
             # El crítico es del atacante; el bloqueo y el reflejo son del defensor.
-            crit   = random.random() < att.get("prob_critico", 0.15)
-            block  = random.random() < dfn.get("prob_bloqueo", 0.10)
-            reflect = random.random() < dfn.get("prob_reflejo", 0.08)
+            crit = force_crit or random.random() < att["stats"].get("prob_critico", 0.15)
+            # Bloqueo por habilidad: protege del próximo ataque, sin sorteo.
+            if dfn["block_next"]:
+                dfn["block_next"] = False
+                log.append({"round": rnd, "type": "block",
+                            "attacker": att["stats"]["race"], "defender": dfn["stats"]["race"]})
+                return hp_att, hp_dfn
+            block = random.random() < dfn["stats"].get("prob_bloqueo", 0.10)
+            reflect = random.random() < dfn["stats"].get("prob_reflejo", 0.08)
 
             if block:
                 log.append({"round": rnd, "type": "block",
-                             "attacker": att["race"], "defender": dfn["race"]})
+                            "attacker": att["stats"]["race"], "defender": dfn["stats"]["race"]})
                 return hp_att, hp_dfn  # Sin daño
 
             dmg = max(5, int(
-                att["atq_fisico"] * (0.80 + random.random() * 0.45)
-                - dfn["defensa"] * 0.55
+                att["stats"]["atq_fisico"] * (0.80 + random.random() * 0.45)
+                - dfn["stats"]["defensa"] * 0.55
             ))
             if crit:
                 dmg = int(dmg * 2.1)
+            if dmg_mult != 1.0:
+                dmg = int(dmg * dmg_mult)
+            # Reducción por habilidad: el ataque hace (1 − value) de daño.
+            if dfn["reduce_next"]:
+                dfn["reduce_next"] = False
+                dmg = max(1, int(dmg * (1 - dfn["ability"]["value"])))
 
             # Reflejo: el defensor devuelve parte del daño
-            reflected = int(dmg * dfn.get("reflejo", 0) / 100) if reflect else 0
+            reflected = int(dmg * dfn["stats"].get("reflejo", 0) / 100) if reflect else 0
 
             hp_dfn = max(0, hp_dfn - dmg)
             hp_att = max(0, hp_att - reflected)
@@ -70,28 +149,46 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
             log.append({
                 "round":     rnd,
                 "type":      "crit" if crit else "reflect" if reflect else "normal",
-                "attacker":  att["race"],
-                "defender":  dfn["race"],
+                "attacker":  att["stats"]["race"],
+                "defender":  dfn["stats"]["race"],
                 "damage":    dmg,
                 "reflected": reflected,
                 "crit":      crit,
             })
             return hp_att, hp_dfn
 
+        hp_att, hp_dfn = strike(hp_att, hp_dfn, force_crit, dmg_mult)
+        if extra and hp_dfn > 0:
+            # Segundo golpe: sin habilidad y sin crítico forzado.
+            hp_att, hp_dfn = strike(hp_att, hp_dfn, False, 1.0)
+        return hp_att, hp_dfn
+
+    battle_round = [1]
+    for rnd in range(1, MAX_ROUNDS + 1):
+        battle_round[0] = rnd
+        # El enfriamiento baja 1 por ronda (después de la ronda 1, en la
+        # que ya se disparó si estaba listo).
+        for st in (p1, p2):
+            if st["cd"] > 0:
+                st["cd"] -= 1
+        # Orden de ataque: mayor vel_ataque va primero
+        first, second = (p1, p2) if p1["stats"]["vel_ataque"] >= p2["stats"]["vel_ataque"] else (p2, p1)
+        first_is_p1 = first is p1
+
         # Primer atacante
         if first_is_p1:
-            p1_hp, p2_hp = attack(attacker, defender, p1_hp, p2_hp)
+            p1_hp, p2_hp = attack(p1, p2, p1_hp, p2_hp)
         else:
-            p2_hp, p1_hp = attack(defender, attacker, p2_hp, p1_hp)
+            p2_hp, p1_hp = attack(p2, p1, p2_hp, p1_hp)
 
         if p1_hp <= 0 or p2_hp <= 0:
             break
 
         # Segundo atacante
         if first_is_p1:
-            p2_hp, p1_hp = attack(defender, attacker, p2_hp, p1_hp)
+            p2_hp, p1_hp = attack(p2, p1, p2_hp, p1_hp)
         else:
-            p1_hp, p2_hp = attack(attacker, defender, p1_hp, p2_hp)
+            p1_hp, p2_hp = attack(p1, p2, p1_hp, p2_hp)
 
         if p1_hp <= 0 or p2_hp <= 0:
             break
@@ -221,6 +318,8 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
             "level":   opp.level,
             "vida":    p2_stats["vida"],
             "atq":     p2_stats["atq_fisico"],
+            "display_name": opp.display_name(),
+            "ability": opp.ability_info(),
         },
         "log":          log,
     }
