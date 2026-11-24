@@ -37,10 +37,45 @@ class SellTick(BaseModel):
 
 @router.get("/listings")
 async def get_listings():
-    """Todos los NFTs en venta en el P2P (activos)."""
+    """Todos los NFTs en venta en el P2P (activos).
+
+    Serialización manual: el doc de Mongo trae ObjectId (_id) y
+    datetimes, que FastAPI no puede serializar a JSON (antes este
+    endpoint devolvía 500 en cuanto había un anuncio real). Se
+    devuelve listing_id como string y el snapshot limpio, con los
+    computed_stats del oráculo para que el frontend no recalcule.
+    """
     db = get_db()
-    cursor = db.market_listings.find({"status": "active"}, {"_id": 0})
-    return await cursor.to_list(length=100)
+    oracle_mults = {}
+    try:
+        from services.oracle_service import OracleService
+        oracle_mults = OracleService.get_cached_multipliers()
+    except Exception:
+        oracle_mults = {}
+    docs = await db.market_listings.find({"status": "active"}).to_list(length=100)
+    out = []
+    for d in docs:
+        snap = dict(d.get("nft_snapshot") or {})
+        snap.pop("_id", None)
+        for k in ("created_at", "updated_at"):
+            if hasattr(snap.get(k), "isoformat"):
+                snap[k] = snap[k].isoformat()
+        try:
+            g = Gladiator(**{k: v for k, v in snap.items() if k in Gladiator.model_fields})
+            snap["computed_stats"] = g.compute_stats(oracle_mults)
+        except Exception:
+            snap["computed_stats"] = None
+        created = d.get("created_at")
+        out.append({
+            "listing_id":    str(d["_id"]),
+            "gladiator_id":  d["gladiator_id"],
+            "seller_wallet": d["seller_wallet"],
+            "price_usdt":    d["price_usdt"],
+            "status":        d["status"],
+            "created_at":    created.isoformat() if hasattr(created, "isoformat") else created,
+            "nft_snapshot":  snap,
+        })
+    return out
 
 
 @router.post("/list")
@@ -78,8 +113,13 @@ async def list_nft(req: ListingCreate, wallet: str = Depends(get_current_user)):
 async def buy_nft(listing_id: str, wallet: str = Depends(get_current_user)):
     """Compra un NFT listado."""
     from bson import ObjectId
+    from bson.errors import InvalidId
     db = get_db()
-    listing = await db.market_listings.find_one({"_id": ObjectId(listing_id), "status": "active"})
+    try:
+        oid = ObjectId(listing_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=404, detail="Listing no encontrado")
+    listing = await db.market_listings.find_one({"_id": oid, "status": "active"})
     if not listing:
         raise HTTPException(status_code=404, detail="Listing no encontrado")
     if listing["seller_wallet"] == wallet:
@@ -104,7 +144,7 @@ async def buy_nft(listing_id: str, wallet: str = Depends(get_current_user)):
         {"$set": {"owner_wallet": wallet, "is_listed": False}},
     )
     await db.market_listings.update_one(
-        {"_id": ObjectId(listing_id)},
+        {"_id": oid},
         {"$set": {"status": "sold", "buyer_wallet": wallet, "sold_at": datetime.utcnow()}},
     )
     return {"success": True, "paid": listing["price_usdt"], "platform_fee": platform_fee}
