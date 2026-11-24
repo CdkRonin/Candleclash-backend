@@ -61,11 +61,13 @@ def compute_energy(user: dict, now: datetime = None) -> dict:
 async def refresh_energy(db, wallet: str, now: datetime = None) -> dict:
     """Recalcula la energía del usuario y la persiste.
 
-    Retorna {"energy", "minutes_to_next"}. Usuario inexistente: lleno.
+    Retorna {"energy", "minutes_to_next", "energy_updated_at"}.
+    Usuario inexistente: lleno.
     """
     user = await db.users.find_one({"wallet_address": wallet.lower()})
     if not user:
-        return {"energy": settings.ENERGY_MAX, "minutes_to_next": 0}
+        return {"energy": settings.ENERGY_MAX, "minutes_to_next": 0,
+                "energy_updated_at": now or datetime.utcnow()}
     state = compute_energy(user, now)
     await db.users.update_one(
         {"wallet_address": wallet.lower()},
@@ -74,7 +76,8 @@ async def refresh_energy(db, wallet: str, now: datetime = None) -> dict:
             "energy_updated_at": state["energy_updated_at"],
         }},
     )
-    return {"energy": state["energy"], "minutes_to_next": state["minutes_to_next"]}
+    return {"energy": state["energy"], "minutes_to_next": state["minutes_to_next"],
+            "energy_updated_at": state["energy_updated_at"]}
 
 
 async def consume_energy(db, wallet: str) -> dict:
@@ -104,7 +107,17 @@ async def consume_energy(db, wallet: str) -> dict:
         raise ValueError(
             f"Sin energía. Próxima energía en {state['minutes_to_next']} min."
         )
+    # Recalcular los minutos con la energía YA descontada: si estaba
+    # llena, la próxima llega en 30 min. Antes se devolvían los minutos
+    # del estado previo al consumo (0 con energía llena) y la cabecera
+    # se quedaba en "+1 en 0 min" sin regenerar nunca en pantalla.
+    post_state = compute_energy(
+        {
+            "energy": state["energy"] - settings.ENERGY_PER_BATTLE,
+            "energy_updated_at": state["energy_updated_at"],
+        }
+    )
     return {
-        "energy": state["energy"] - settings.ENERGY_PER_BATTLE,
-        "minutes_to_next": state["minutes_to_next"],
+        "energy": post_state["energy"],
+        "minutes_to_next": post_state["minutes_to_next"],
     }

@@ -15,6 +15,18 @@ MAX_ROUNDS = 25
 XP_WIN  = 40
 XP_LOSE = 20
 
+RARITY_ORDER = ["Cobre", "Bronce", "Plata", "Oro", "Diamante", "Legendario"]
+
+
+def _opp_rarity_pool(player_rarity: str) -> list:
+    """Rarezas posibles del rival: hasta la del jugador y como mucho dos
+    escalones por debajo, ponderadas hacia abajo. Con el pool viejo
+    (máx. Plata) un Legendario Lv42 (~12000 HP) se enfrentaba a rivales
+    de ~3800 HP: el rival no puede ser mucho más débil que el jugador."""
+    idx = RARITY_ORDER.index(player_rarity) if player_rarity in RARITY_ORDER else 0
+    pool = RARITY_ORDER[max(0, idx - 2):idx + 1]
+    return pool + pool[:-1] if len(pool) > 1 else pool
+
 
 def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
     """
@@ -118,21 +130,34 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
     p1_gladiator = Gladiator(**nft_doc)
     p1_stats = p1_gladiator.compute_stats(oracle_mults)
 
-    # Generar oponente calibrado al nivel del jugador (±5 niveles)
-    opp_level = max(1, min(50, p1_gladiator.level + random.randint(-5, 5)))
-    opp_lineage = random.choice(list(OracleService.get_cached_multipliers().keys()))
-    opp_rarity_pool = ["Cobre", "Cobre", "Bronce", "Bronce", "Plata"]
-    opp_rarity = random.choice(opp_rarity_pool)
-
-    opp = Gladiator(
-        token_id="npc",
-        owner_wallet="system",
-        race=random.choice(["Orco", "Dracónido", "Minotauro", "Forjado", "Tiefling"]),
-        lineage=opp_lineage,
-        rarity=opp_rarity,
-        level=opp_level,
-    )
-    p2_stats = opp.compute_stats(oracle_mults)
+    # Generar oponente de poder SIMILAR al jugador. Antes: nivel ±5 con
+    # rareza al azar, lo que daba peleas absurdas (p. ej. 12016 HP contra
+    # 3831 HP) sin explicación. Ahora se prueban candidatos (nivel ±5,
+    # rareza del pool habitual) y se queda el más cercano en vida; si
+    # uno cae dentro del ±30%, se toma ese.
+    p1_hp = p1_stats["vida"]
+    opp = None
+    p2_stats = None
+    best_gap = None
+    for _ in range(40):
+        cand = Gladiator(
+            token_id="npc",
+            owner_wallet="system",
+            race=random.choice(["Orco", "Dracónido", "Minotauro", "Forjado", "Tiefling"]),
+            lineage=random.choice(list(oracle_mults.keys())),
+            rarity=random.choice(_opp_rarity_pool(p1_gladiator.rarity)),
+            level=max(1, min(50, p1_gladiator.level + random.randint(-5, 5))),
+        )
+        cand_stats = cand.compute_stats(oracle_mults)
+        gap = abs(cand_stats["vida"] - p1_hp) / max(1, p1_hp)
+        if best_gap is None or gap < best_gap:
+            opp, p2_stats, best_gap = cand, cand_stats, gap
+        if 0.70 <= cand_stats["vida"] / max(1, p1_hp) <= 1.30:
+            opp, p2_stats = cand, cand_stats
+            break
+    opp_lineage = opp.lineage
+    opp_rarity = opp.rarity
+    opp_level = opp.level
 
     # Simular
     result, log = simulate_battle(p1_stats, p2_stats)
@@ -189,5 +214,13 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
         "xp_gained":    xp_gained,
         "level_after":  new_level,
         "leveled_up":   new_level > p1_gladiator.level,
+        "opponent": {
+            "race":    opp.race,
+            "lineage": opp.lineage,
+            "rarity":  opp.rarity,
+            "level":   opp.level,
+            "vida":    p2_stats["vida"],
+            "atq":     p2_stats["atq_fisico"],
+        },
         "log":          log,
     }
