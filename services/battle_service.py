@@ -4,12 +4,20 @@ TODA la lógica ocurre en el servidor. El cliente solo recibe el log de resultad
 Los atributos son calculados aquí con los multiplicadores del oráculo en tiempo real.
 """
 
+import logging
 import random
 from datetime import datetime
 from models.gladiator import Gladiator
 from services.oracle_service import OracleService
+from services.energy_service import refresh_energy, compute_energy
 from config import ability_for_race
 from database import get_db
+
+logger = logging.getLogger(__name__)
+
+
+class NoEnergyError(ValueError):
+    """Sin energía para pelear (el router lo traduce a 403)."""
 
 
 MAX_ROUNDS = 25
@@ -208,9 +216,17 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
     1. Carga el gladiador del jugador
     2. Genera un oponente automático calibrado
     3. Calcula stats con el oráculo
-    4. Simula la batalla en el servidor
-    5. Guarda el resultado en MongoDB
-    6. Retorna log + recompensas
+    4. Simula la batalla EN MEMORIA (sin escribir nada)
+    5. Aplica en UNA sola actualización atómica: −1 energía + recompensas
+       ($TICK, trofeos, victorias/derrotas), con filtro energy >= 1. Si
+       dos batallas simultáneas pelean por la última energía, solo una
+       aplica; la otra recibe NoEnergyError y no pierde nada.
+    6. Actualiza el XP del gladiador (releyendo sus valores justo antes).
+    7. Guarda el documento de batalla; si ESO falla, solo queda en el
+       log: el usuario ya tiene su energía descontada y sus recompensas.
+
+    Antes la energía se descontaba en el router ANTES de simular: si
+    algo fallaba después, el usuario perdía energía sin resultado.
     """
     db = get_db()
     oracle_mults = OracleService.get_cached_multipliers()
@@ -256,7 +272,7 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
     opp_rarity = opp.rarity
     opp_level = opp.level
 
-    # Simular
+    # Simular (en memoria: no se ha escrito nada todavía)
     result, log = simulate_battle(p1_stats, p2_stats)
     player_won = result["winner"] == "p1"
 
@@ -265,30 +281,76 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
     xp_gained    = XP_WIN if player_won else XP_LOSE
     trophy_delta = 25 if player_won else -10
 
-    # Actualizar jugador en MongoDB
-    update = {
-        "$inc": {
+    # Energía regenerada hasta ahora (lectura con persistencia, como
+    # siempre: la regeneración se calcula al leer, sin jobs).
+    energy_state = await refresh_energy(db, player_wallet)
+    if energy_state["energy"] < 1:
+        raise NoEnergyError(
+            f"Sin energía. Próxima energía en "
+            f"{energy_state['minutes_to_next']} min."
+        )
+
+    # UNA sola actualización atómica: energía + recompensas juntas.
+    applied = await db.users.update_one(
+        {"wallet_address": player_wallet.lower(), "energy": {"$gte": 1}},
+        {"$inc": {
+            "energy": -1,
             "tick_balance": tick_reward,
             "trophies":     trophy_delta,
             "wins":         1 if player_won else 0,
             "losses":       0 if player_won else 1,
-        }
-    }
-    await db.users.update_one({"wallet_address": player_wallet.lower()}, update)
-
-    # Actualizar XP del gladiador
-    new_xp = p1_gladiator.xp + xp_gained
-    new_level = p1_gladiator.level
-    while new_level < 50 and new_xp >= int(80 * (new_level ** 1.35)):
-        new_xp -= int(80 * (new_level ** 1.35))
-        new_level += 1
-
-    await db.gladiators.update_one(
-        {"token_id": gladiator_id},
-        {"$set": {"xp": new_xp, "level": new_level, "updated_at": datetime.utcnow()}},
+        }},
     )
+    if applied.modified_count == 0:
+        # Otra batalla simultánea ganó la última energía.
+        state = await refresh_energy(db, player_wallet)
+        raise NoEnergyError(
+            f"Sin energía. Próxima energía en {state['minutes_to_next']} min."
+        )
+    # Energía restante y minutos con la energía YA descontada (igual
+    # que hacía consume_energy: con energía llena, la próxima en 30 min).
+    post_state = compute_energy({
+        "energy": energy_state["energy"] - 1,
+        "energy_updated_at": energy_state["energy_updated_at"],
+    })
 
-    # Guardar batalla
+    # XP del gladiador: releer sus valores justo antes de escribir,
+    # para no pisar una forja simultánea con valores viejos.
+    fresh = await db.gladiators.find_one({
+        "token_id": gladiator_id,
+        "owner_wallet": player_wallet.lower(),
+        "is_burned": False,
+    })
+    new_level = p1_gladiator.level
+    new_xp = p1_gladiator.xp
+    if fresh:
+        new_xp = fresh["xp"] + xp_gained
+        new_level = fresh["level"]
+        while new_level < 50 and new_xp >= int(80 * (new_level ** 1.35)):
+            new_xp -= int(80 * (new_level ** 1.35))
+            new_level += 1
+        xp_res = await db.gladiators.update_one(
+            {"token_id": gladiator_id,
+             "owner_wallet": player_wallet.lower(),
+             "is_burned": False,
+             "level": fresh["level"], "xp": fresh["xp"]},
+            {"$set": {"xp": new_xp, "level": new_level,
+                      "updated_at": datetime.utcnow()}},
+        )
+        if xp_res.modified_count == 0:
+            logger.warning(
+                "batalla: no se pudo aplicar el XP al gladiador %s "
+                "(cambio concurrente); recompensas ya acreditadas",
+                gladiator_id,
+            )
+    else:
+        logger.warning(
+            "batalla: gladiador %s desapareció tras la pelea; "
+            "recompensas ya acreditadas", gladiator_id
+        )
+
+    # Guardar batalla: si falla, solo queda en el log; el usuario ya
+    # tiene su resultado y sus recompensas.
     battle_doc = {
         "player_wallet":   player_wallet.lower(),
         "gladiator_id":    gladiator_id,
@@ -302,8 +364,16 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
         "level_after":     new_level,
         "timestamp":       datetime.utcnow(),
     }
-    await db.battles.insert_one(battle_doc)
+    try:
+        await db.battles.insert_one(battle_doc)
+    except Exception as e:
+        logger.warning("batalla: no se pudo guardar el documento: %s", e)
 
+    logger.info(
+        "batalla wallet=%s gladiador=%s resultado=%s tick=+%d xp=+%d",
+        player_wallet.lower(), gladiator_id, result["winner"],
+        tick_reward, xp_gained,
+    )
     return {
         "result":       result["winner"],
         "rounds":       result["rounds"],
@@ -311,6 +381,8 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
         "xp_gained":    xp_gained,
         "level_after":  new_level,
         "leveled_up":   new_level > p1_gladiator.level,
+        "energy":       post_state["energy"],
+        "energy_next_in_min": post_state["minutes_to_next"],
         "opponent": {
             "race":    opp.race,
             "lineage": opp.lineage,

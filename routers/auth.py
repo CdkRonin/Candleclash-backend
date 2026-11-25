@@ -1,12 +1,18 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+from pymongo import ReturnDocument
 from services.auth_service import (
     generate_nonce, verify_signature, create_jwt,
     decode_jwt, get_or_create_user, build_login_message,
 )
 from services.energy_service import refresh_energy
+from services.rate_limit import ip_rate_limit, wallet_ip_rate_limit
 from database import get_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 bearer = HTTPBearer()
@@ -34,9 +40,13 @@ async def get_current_user(
 
 
 @router.get("/nonce/{wallet_address}")
-async def get_nonce(wallet_address: str):
+async def get_nonce(
+    wallet_address: str,
+    _limit=Depends(wallet_ip_rate_limit(10, 60, "nonce")),
+):
     """
     Paso 1 del login: el frontend pide un nonce para firmar con MetaMask.
+    Límite: 10/min por wallet+IP.
     """
     user = await get_or_create_user(wallet_address)
     return {
@@ -46,29 +56,43 @@ async def get_nonce(wallet_address: str):
 
 
 @router.post("/login")
-async def login(req: LoginRequest):
+async def login(
+    req: LoginRequest,
+    _limit=Depends(ip_rate_limit(30, 60, "login")),
+):
     """
     Paso 2: el frontend envía la firma, el servidor la verifica y emite JWT.
+    Límite: 30/min por IP.
+
+    El consumo del nonce es ATÓMICO: primero se verifica la firma (cálculo
+    puro, sin escribir) y luego se rota el nonce en una única actualización
+    condicional (solo si el nonce guardado sigue siendo el firmado). Dos
+    logins concurrentes con el mismo nonce: el primero rota el nonce y el
+    segundo no encuentra el filtro → 400 "Nonce inválido o ya usado".
+    Antes la verificación y la rotación eran pasos separados y dos
+    peticiones simultáneas podían pasar las dos.
+    El flujo no cambia (nonce → firma → JWT) ni el mensaje de firma.
     """
     db = get_db()
     wallet = req.wallet_address.lower()
 
-    # Verificar que el nonce coincide con el que se emitió
-    user = await db.users.find_one({"wallet_address": wallet})
-    if not user or user.get("nonce") != req.nonce:
-        raise HTTPException(status_code=400, detail="Nonce inválido")
-
     if not verify_signature(wallet, req.nonce, req.signature):
+        logger.warning("login fallido (firma inválida) wallet=%s", wallet)
         raise HTTPException(status_code=401, detail="Firma inválida")
 
-    # Invalidar el nonce usado: una firma capturada no se puede
-    # reutilizar para sacar otro JWT (el próximo /nonce genera uno nuevo).
-    await db.users.update_one(
-        {"wallet_address": wallet},
+    updated = await db.users.find_one_and_update(
+        {"wallet_address": wallet, "nonce": req.nonce},
         {"$set": {"nonce": generate_nonce()}},
+        return_document=ReturnDocument.AFTER,
     )
+    if not updated:
+        # El nonce no coincide o ya lo consumió otro login concurrente.
+        raise HTTPException(
+            status_code=400, detail="Nonce inválido o ya usado"
+        )
 
     token = create_jwt(wallet)
+    logger.info("login ok wallet=%s", wallet)
     return {"access_token": token, "token_type": "bearer"}
 
 

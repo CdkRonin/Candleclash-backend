@@ -24,12 +24,16 @@ Reglas:
   la respuesta (verified: false + note) y en la UI.
 """
 from datetime import datetime
+import logging
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from pymongo.errors import DuplicateKeyError
 from routers.auth import get_current_user
+from services.rate_limit import wallet_rate_limit
 from database import get_db
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -98,10 +102,15 @@ class ClaimRequest(BaseModel):
 
 
 @router.post("/claim")
-async def claim_mission(req: ClaimRequest, wallet: str = Depends(get_current_user)):
+async def claim_mission(
+    req: ClaimRequest,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(10, 60, "missions")),
+):
     """Reclama el premio de una misión completada hoy. Acredita el
     $TICK al saldo del servidor (emisión del juego, igual que los
-    premios de batalla). Una sola vez por misión por día."""
+    premios de batalla). Una sola vez por misión por día.
+    Límite: 10/min por wallet."""
     m = settings.MISSIONS.get(req.mission_id)
     if not m:
         raise HTTPException(status_code=400, detail="Misión no válida")
@@ -134,6 +143,10 @@ async def claim_mission(req: ClaimRequest, wallet: str = Depends(get_current_use
     await db.users.update_one(
         {"wallet_address": wallet},
         {"$inc": {"tick_balance": m["reward"]}},
+    )
+    logger.info(
+        "missions claim wallet=%s mision=%s tick=+%d fecha=%s",
+        wallet, req.mission_id, m["reward"], date,
     )
     return {
         "success":      True,

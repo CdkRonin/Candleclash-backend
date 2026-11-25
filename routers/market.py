@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from pymongo import ReturnDocument
 from routers.auth import get_current_user
+from services.rate_limit import wallet_rate_limit
 from database import get_db
 from config import (
     settings,
@@ -79,8 +80,14 @@ async def get_listings():
 
 
 @router.post("/list")
-async def list_nft(req: ListingCreate, wallet: str = Depends(get_current_user)):
-    """Publica un NFT a la venta. El NFT se marca como is_listed=True."""
+async def list_nft(
+    req: ListingCreate,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(20, 60, "market")),
+):
+    """Publica un NFT a la venta. El NFT se marca como is_listed=True.
+    La marca es condicional (solo si sigue sin listar): dos listados
+    simultáneos del mismo NFT solo crean un anuncio."""
     if req.price_usdt < 0.10:
         raise HTTPException(status_code=400, detail="Precio mínimo: 0.10 USDT")
     db = get_db()
@@ -93,10 +100,14 @@ async def list_nft(req: ListingCreate, wallet: str = Depends(get_current_user)):
     if not nft:
         raise HTTPException(status_code=404, detail="NFT no encontrado o ya listado")
 
-    await db.gladiators.update_one(
-        {"token_id": req.gladiator_id},
+    marked = await db.gladiators.update_one(
+        {"token_id": req.gladiator_id, "owner_wallet": wallet,
+         "is_burned": False, "is_listed": False},
         {"$set": {"is_listed": True}},
     )
+    if marked.modified_count == 0:
+        raise HTTPException(status_code=404, detail="NFT no encontrado o ya listado")
+
     listing = {
         "gladiator_id": req.gladiator_id,
         "seller_wallet": wallet,
@@ -106,12 +117,29 @@ async def list_nft(req: ListingCreate, wallet: str = Depends(get_current_user)):
         "created_at":   datetime.utcnow(),
     }
     result = await db.market_listings.insert_one(listing)
+    logger.info(
+        "market list wallet=%s gladiador=%s precio=%.2f USDT listing=%s",
+        wallet, req.gladiator_id, listing["price_usdt"],
+        str(result.inserted_id),
+    )
     return {"listing_id": str(result.inserted_id)}
 
 
 @router.post("/buy/{listing_id}")
-async def buy_nft(listing_id: str, wallet: str = Depends(get_current_user)):
-    """Compra un NFT listado."""
+async def buy_nft(
+    listing_id: str,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(20, 60, "market")),
+):
+    """Compra un NFT listado.
+
+    Atómico por pasos: primero se RECLAMA el anuncio (find_one_and_update
+    con status=active → sold); dos compradores simultáneos: solo uno lo
+    reclama, el otro recibe 404. Después se cobra al comprador con $inc
+    condicional (saldo >= precio) y se transfiere el NFT con filtro de
+    vendedor+listado. Si algo falla tras el reclamo, se devuelve el
+    anuncio a activo y se reembolsa lo cobrado.
+    """
     from bson import ObjectId
     from bson.errors import InvalidId
     db = get_db()
@@ -119,71 +147,144 @@ async def buy_nft(listing_id: str, wallet: str = Depends(get_current_user)):
         oid = ObjectId(listing_id)
     except (InvalidId, TypeError):
         raise HTTPException(status_code=404, detail="Listing no encontrado")
-    listing = await db.market_listings.find_one({"_id": oid, "status": "active"})
+
+    # 1) Reclamar el anuncio: solo uno puede pasar de active a sold.
+    listing = await db.market_listings.find_one_and_update(
+        {"_id": oid, "status": "active"},
+        {"$set": {"status": "sold", "buyer_wallet": wallet,
+                  "sold_at": datetime.utcnow()}},
+        return_document=ReturnDocument.AFTER,
+    )
     if not listing:
         raise HTTPException(status_code=404, detail="Listing no encontrado")
-    if listing["seller_wallet"] == wallet:
-        raise HTTPException(status_code=400, detail="No puedes comprar tu propio NFT")
 
-    buyer = await db.users.find_one({"wallet_address": wallet})
-    if not buyer or buyer.get("usdt_balance", 0) < listing["price_usdt"]:
-        raise HTTPException(status_code=400, detail="Saldo USDT insuficiente")
+    async def _rollback_listing():
+        await db.market_listings.update_one(
+            {"_id": oid},
+            {"$set": {"status": "active"},
+             "$unset": {"buyer_wallet": "", "sold_at": ""}},
+        )
+
+    if listing["seller_wallet"] == wallet:
+        await _rollback_listing()
+        raise HTTPException(status_code=400, detail="No puedes comprar tu propio NFT")
 
     platform_fee = round(listing["price_usdt"] * settings.MARKET_FEE_PCT, 2)
     seller_receives = round(listing["price_usdt"] - platform_fee, 2)
 
-    # Transferencias
-    await db.users.update_one({"wallet_address": wallet},
-        {"$inc": {"usdt_balance": -listing["price_usdt"]}})
-    await db.users.update_one({"wallet_address": listing["seller_wallet"]},
-        {"$inc": {"usdt_balance": seller_receives}})
+    # 2) Cobrar al comprador (solo si el saldo cubre).
+    charged = await db.users.update_one(
+        {"wallet_address": wallet,
+         "usdt_balance": {"$gte": listing["price_usdt"]}},
+        {"$inc": {"usdt_balance": -listing["price_usdt"]}},
+    )
+    if charged.modified_count == 0:
+        await _rollback_listing()
+        raise HTTPException(status_code=400, detail="Saldo USDT insuficiente")
 
-    # Transferir NFT
-    await db.gladiators.update_one(
-        {"token_id": listing["gladiator_id"]},
+    # 3) Pagar al vendedor.
+    await db.users.update_one(
+        {"wallet_address": listing["seller_wallet"]},
+        {"$inc": {"usdt_balance": seller_receives}},
+    )
+
+    # 4) Transferir el NFT (revalidando vendedor y listado).
+    moved = await db.gladiators.update_one(
+        {"token_id": listing["gladiator_id"],
+         "owner_wallet": listing["seller_wallet"], "is_listed": True},
         {"$set": {"owner_wallet": wallet, "is_listed": False}},
     )
-    await db.market_listings.update_one(
-        {"_id": oid},
-        {"$set": {"status": "sold", "buyer_wallet": wallet, "sold_at": datetime.utcnow()}},
+    if moved.modified_count == 0:
+        # No debería pasar (el anuncio estaba activo), pero si pasa:
+        # reembolsar al comprador, quitar el pago al vendedor y
+        # devolver el anuncio a activo.
+        logger.error(
+            "market buy: no se pudo transferir el NFT %s tras cobrar; "
+            "revirtiendo compra listing=%s", listing["gladiator_id"],
+            listing_id,
+        )
+        await db.users.update_one(
+            {"wallet_address": wallet},
+            {"$inc": {"usdt_balance": listing["price_usdt"]}},
+        )
+        await db.users.update_one(
+            {"wallet_address": listing["seller_wallet"]},
+            {"$inc": {"usdt_balance": -seller_receives}},
+        )
+        await _rollback_listing()
+        raise HTTPException(
+            status_code=500, detail="No se pudo completar la compra"
+        )
+
+    logger.info(
+        "market buy comprador=%s vendedor=%s gladiador=%s pagado=%.2f "
+        "USDT fee=%.2f listing=%s",
+        wallet, listing["seller_wallet"], listing["gladiator_id"],
+        listing["price_usdt"], platform_fee, listing_id,
     )
     return {"success": True, "paid": listing["price_usdt"], "platform_fee": platform_fee}
 
 
 @router.post("/tick/buy")
-async def buy_tick(req: BuyTick, wallet: str = Depends(get_current_user)):
-    """Compra $TICK con USDT a precio fijo."""
+async def buy_tick(
+    req: BuyTick,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(20, 60, "market")),
+):
+    """Compra $TICK con USDT a precio fijo. El cobro es condicional
+    (saldo >= importe): dos compras simultáneas no pueden gastar el
+    mismo USDT dos veces."""
     if req.usdt_amount < 0.10:
         raise HTTPException(status_code=400, detail="Mínimo 0.10 USDT")
     db = get_db()
-    user = await db.users.find_one({"wallet_address": wallet})
-    if not user or user.get("usdt_balance", 0) < req.usdt_amount:
-        raise HTTPException(status_code=400, detail="Saldo USDT insuficiente")
     tick_received = int(req.usdt_amount * settings.TICK_BUY_RATE)
-    await db.users.update_one({"wallet_address": wallet}, {
-        "$inc": {"usdt_balance": -req.usdt_amount, "tick_balance": tick_received},
-    })
+    res = await db.users.update_one(
+        {"wallet_address": wallet,
+         "usdt_balance": {"$gte": req.usdt_amount}},
+        {"$inc": {"usdt_balance": -req.usdt_amount,
+                  "tick_balance": tick_received}},
+    )
+    if res.modified_count == 0:
+        raise HTTPException(status_code=400, detail="Saldo USDT insuficiente")
+    logger.info(
+        "market tick/buy wallet=%s usdt=%.2f tick=+%d",
+        wallet, req.usdt_amount, tick_received,
+    )
     return {"tick_received": tick_received, "usdt_spent": req.usdt_amount}
 
 
 @router.post("/tick/sell")
-async def sell_tick(req: SellTick, wallet: str = Depends(get_current_user)):
-    """Vende $TICK por USDT con fee del 20%."""
+async def sell_tick(
+    req: SellTick,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(20, 60, "market")),
+):
+    """Vende $TICK por USDT con fee del 20%. La venta es condicional
+    (saldo $TICK >= cantidad), igual que la compra."""
     if req.tick_amount < 10:
         raise HTTPException(status_code=400, detail="Mínimo 10 $TICK")
     db = get_db()
-    user = await db.users.find_one({"wallet_address": wallet})
-    if not user or user.get("tick_balance", 0) < req.tick_amount:
-        raise HTTPException(status_code=400, detail="Saldo $TICK insuficiente")
     usdt_received = round(req.tick_amount * settings.TICK_SELL_RATE, 2)
-    await db.users.update_one({"wallet_address": wallet}, {
-        "$inc": {"tick_balance": -req.tick_amount, "usdt_balance": usdt_received},
-    })
+    res = await db.users.update_one(
+        {"wallet_address": wallet,
+         "tick_balance": {"$gte": req.tick_amount}},
+        {"$inc": {"tick_balance": -req.tick_amount,
+                  "usdt_balance": usdt_received}},
+    )
+    if res.modified_count == 0:
+        raise HTTPException(status_code=400, detail="Saldo $TICK insuficiente")
+    logger.info(
+        "market tick/sell wallet=%s tick=-%d usdt=+%.2f",
+        wallet, req.tick_amount, usdt_received,
+    )
     return {"usdt_received": usdt_received, "tick_sold": req.tick_amount}
 
 
 @router.post("/packs/recluta")
-async def claim_starter_pack(wallet: str = Depends(get_current_user)):
+async def claim_starter_pack(
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(5, 60, "pack")),
+):
     """Paquete Recluta — PRIMERA VEZ, 1 por cuenta.
 
     5 NFTs generados EN EL SERVIDOR (sorteos reales de linaje y rareza,
@@ -269,6 +370,12 @@ async def claim_starter_pack(wallet: str = Depends(get_current_user)):
             await db.gladiators.delete_many({"token_id": {"$in": created_ids}})
         raise
 
+    logger.info(
+        "market pack/recluta wallet=%s gladiadores=%d tick=+%d "
+        "cobrado_usdt=%.2f beta_sin_cobro=%s",
+        wallet.lower(), len(gladiators), settings.PACK_RECLUTA_TICK_BONUS,
+        charged_usdt, charged_usdt == 0,
+    )
     return {
         "gladiators": gladiators,
         "tick_bonus": settings.PACK_RECLUTA_TICK_BONUS,

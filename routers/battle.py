@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from routers.auth import get_current_user
-from services.battle_service import run_battle
-from services.energy_service import consume_energy
+from services.battle_service import run_battle, NoEnergyError
+from services.rate_limit import wallet_rate_limit
 from database import get_db
 
 router = APIRouter()
@@ -13,13 +13,19 @@ class BattleRequest(BaseModel):
 
 
 @router.post("/fight")
-async def fight(req: BattleRequest, wallet: str = Depends(get_current_user)):
+async def fight(
+    req: BattleRequest,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(30, 60, "fight")),
+):
     """Inicia una batalla automática con matchmaking del servidor.
 
     Cada batalla cuesta 1 energía (tope 10, regenera 1 cada 30 min).
     Sin energía responde 403 con los minutos que faltan. El gladiador
-    se valida ANTES de consumir, para no gastar energía en una pelea
-    que no puede ocurrir.
+    se valida ANTES de simular, para no gastar energía en una pelea
+    que no puede ocurrir. La energía y las recompensas se aplican en
+    UNA sola actualización atómica dentro de run_battle: si la pelea
+    falla, no se pierde energía en vano. Límite: 30/min por wallet.
     """
     db = get_db()
     nft = await db.gladiators.find_one({
@@ -32,15 +38,11 @@ async def fight(req: BattleRequest, wallet: str = Depends(get_current_user)):
             status_code=400, detail="Gladiador no encontrado o no te pertenece"
         )
     try:
-        energy = await consume_energy(db, wallet)
-    except ValueError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    try:
         result = await run_battle(wallet, req.gladiator_id)
+    except NoEnergyError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    result["energy"] = energy["energy"]
-    result["energy_next_in_min"] = energy["minutes_to_next"]
     return result
 
 

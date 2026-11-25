@@ -54,7 +54,19 @@ def verify_signature(wallet_address: str, nonce: str, signature: str) -> bool:
 
 
 def create_jwt(wallet_address: str) -> str:
-    """Crea un JWT con expiración de 7 días."""
+    """Crea un JWT con expiración de 7 días.
+
+    TRADE-OFF DOCUMENTADO (decisión 2026-11-25, no cambiar sin revisar):
+    el token vive en localStorage del frontend, NO en cookie HttpOnly.
+    Una cookie HttpOnly sería mejor contra XSS, pero el frontend está
+    en Vercel y el backend en Render (dominios distintos): haría falta
+    SameSite=None + Secure + CORS con credenciales, un cambio mayor y
+    frágil en este despliegue. La defensa real hoy es: higiene XSS
+    (nombres escapados en el frontend, sin innerHTML con datos de
+    usuario), firma con dominio y nonce de un solo uso, y expiración
+    de 7 días. Si algún día hay dinero real en juego, reevaluar la
+    cookie HttpOnly (o un backend for frontend en el mismo dominio).
+    """
     payload = {
         "sub":  wallet_address.lower(),
         "iat":  datetime.utcnow(),

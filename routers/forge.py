@@ -1,10 +1,16 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from pymongo import ReturnDocument
 from typing import List
 from routers.auth import get_current_user
+from services.rate_limit import wallet_rate_limit
 from database import get_db
 from config import settings
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -41,9 +47,56 @@ async def _log_forge_action(db, wallet: str, action: str):
         pass
 
 
+async def _burn_one(db, wallet: str, token_id: str, extra: dict = None):
+    """Quema UN gladiador de forma atómica: solo si sigue siendo del
+    jugador, no quemado y cumple el filtro extra (raza/linaje/rareza/
+    nivel/listado). Devuelve el doc quemado o None si otra petición
+    simultánea ya se lo llevó o cambió su estado. Sin esta condición
+    en la escritura, dos forjas simultáneas podían gastar el mismo
+    sacrificio dos veces."""
+    filt = {"token_id": token_id, "owner_wallet": wallet, "is_burned": False}
+    if extra:
+        filt.update(extra)
+    return await db.gladiators.find_one_and_update(
+        filt,
+        {"$set": {"is_burned": True, "updated_at": datetime.utcnow()}},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def _unburn(db, token_ids: list):
+    """Deshace quemas hechas por esta petición (rollback)."""
+    if token_ids:
+        await db.gladiators.update_many(
+            {"token_id": {"$in": token_ids}},
+            {"$set": {"is_burned": False, "updated_at": datetime.utcnow()}},
+        )
+
+
+async def _charge_tick(db, wallet: str, cost: int) -> bool:
+    """Cobra $TICK solo si el saldo cubre (atómico con $gte). True si
+    cobró; False si no había saldo (otra petición simultánea se lo
+    llevó primero)."""
+    res = await db.users.update_one(
+        {"wallet_address": wallet, "tick_balance": {"$gte": cost}},
+        {"$inc": {"tick_balance": -cost}},
+    )
+    return res.modified_count == 1
+
+
 @router.post("/ascend")
-async def ascend(req: AscendRequest, wallet: str = Depends(get_current_user)):
-    """Funde 4 NFTs idénticos para subir rareza. Cuesta 50 $TICK."""
+async def ascend(
+    req: AscendRequest,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(20, 60, "forge")),
+):
+    """Funde 4 NFTs idénticos para subir rareza. Cuesta 50 $TICK.
+
+    Atómico por pasos con rollback: cada escritura revalida propiedad
+    y estado en el filtro. Si algo falla a mitad, se deshacen las
+    quemas y el cambio de rareza; el saldo solo se cobra al final,
+    cuando todo lo demás ya está aplicado.
+    """
     if len(req.sacrifice_ids) != 3:
         raise HTTPException(status_code=400, detail="Se requieren exactamente 3 sacrificios")
     db = get_db()
@@ -78,24 +131,63 @@ async def ascend(req: AscendRequest, wallet: str = Depends(get_current_user)):
 
     next_rarity = RARITY_ORDER[current_idx + 1]
 
-    # Ejecutar
-    await db.users.update_one({"wallet_address": wallet},
-        {"$inc": {"tick_balance": -settings.FORGE_ASCEND_COST}})
-    await db.gladiators.update_many(
-        {"token_id": {"$in": req.sacrifice_ids}},
-        {"$set": {"is_burned": True, "updated_at": datetime.utcnow()}},
-    )
-    await db.gladiators.update_one(
-        {"token_id": req.main_id},
+    # 1) Quemar los 3 sacrificios, uno a uno y con condición.
+    burned = []
+    for s in sacs:
+        got = await _burn_one(db, wallet, s["token_id"], {
+            "race": main["race"], "lineage": main["lineage"],
+            "rarity": main["rarity"], "is_listed": False,
+        })
+        if not got:
+            await _unburn(db, burned)
+            raise HTTPException(
+                status_code=400,
+                detail="Uno de los sacrificios ya no está disponible",
+            )
+        burned.append(s["token_id"])
+
+    # 2) Subir la rareza del principal, revalidando su estado.
+    main_res = await db.gladiators.update_one(
+        {"token_id": req.main_id, "owner_wallet": wallet,
+         "is_burned": False, "is_listed": False, "rarity": main["rarity"]},
         {"$set": {"rarity": next_rarity, "updated_at": datetime.utcnow()}},
     )
+    if main_res.modified_count == 0:
+        await _unburn(db, burned)
+        raise HTTPException(
+            status_code=400, detail="El gladiador principal cambió de estado"
+        )
+
+    # 3) Cobrar al final: si no hay saldo, deshacer todo.
+    if not await _charge_tick(db, wallet, settings.FORGE_ASCEND_COST):
+        await _unburn(db, burned)
+        await db.gladiators.update_one(
+            {"token_id": req.main_id},
+            {"$set": {"rarity": main["rarity"]}},
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Necesitas {settings.FORGE_ASCEND_COST} $TICK",
+        )
+
     await _log_forge_action(db, wallet, "ascend")
+    logger.info(
+        "forge ascend wallet=%s main=%s %s->%s tick=-%d",
+        wallet, req.main_id, main["rarity"], next_rarity,
+        settings.FORGE_ASCEND_COST,
+    )
     return {"success": True, "new_rarity": next_rarity, "tick_spent": settings.FORGE_ASCEND_COST}
 
 
 @router.post("/feed")
-async def feed(req: FeedRequest, wallet: str = Depends(get_current_user)):
-    """Sacrifica NFTs como alimento para dar XP al gladiador principal."""
+async def feed(
+    req: FeedRequest,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(20, 60, "forge")),
+):
+    """Sacrifica NFTs como alimento para dar XP al gladiador principal.
+    Quemar el alimento y subir el nivel son escrituras condicionales
+    con rollback, igual que en ascend."""
     if not req.food_ids or len(req.food_ids) > 4:
         raise HTTPException(status_code=400, detail="1–4 NFTs de alimento")
 
@@ -131,21 +223,46 @@ async def feed(req: FeedRequest, wallet: str = Depends(get_current_user)):
         new_xp -= need
         new_level += 1
 
-    await db.gladiators.update_many(
-        {"token_id": {"$in": req.food_ids}},
-        {"$set": {"is_burned": True, "updated_at": datetime.utcnow()}},
+    burned = []
+    for f in foods:
+        got = await _burn_one(db, wallet, f["token_id"])
+        if not got:
+            await _unburn(db, burned)
+            raise HTTPException(
+                status_code=400,
+                detail="Uno de los alimentos ya no está disponible",
+            )
+        burned.append(f["token_id"])
+
+    main_res = await db.gladiators.update_one(
+        {"token_id": req.main_id, "owner_wallet": wallet,
+         "is_burned": False, "level": main["level"], "xp": main["xp"]},
+        {"$set": {"xp": new_xp, "level": new_level,
+                  "updated_at": datetime.utcnow()}},
     )
-    await db.gladiators.update_one(
-        {"token_id": req.main_id},
-        {"$set": {"xp": new_xp, "level": new_level, "updated_at": datetime.utcnow()}},
-    )
+    if main_res.modified_count == 0:
+        await _unburn(db, burned)
+        raise HTTPException(
+            status_code=400, detail="El gladiador principal cambió de estado"
+        )
+
     await _log_forge_action(db, wallet, "feed")
+    logger.info(
+        "forge feed wallet=%s main=%s xp=+%d level=%d->%d",
+        wallet, req.main_id, total_xp, main["level"], new_level,
+    )
     return {"success": True, "xp_gained": total_xp, "new_level": new_level, "new_xp": new_xp}
 
 
 @router.post("/rebirth")
-async def rebirth(req: RebirthRequest, wallet: str = Depends(get_current_user)):
-    """Renacimiento: NFT nivel 50 sacrifica clon idéntico nivel 50. Vuelve a Lv1 con +20% stats."""
+async def rebirth(
+    req: RebirthRequest,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(20, 60, "forge")),
+):
+    """Renacimiento: NFT nivel 50 sacrifica clon idéntico nivel 50. Vuelve a Lv1 con +20% stats.
+    Igual que ascend: quemar, renacer y cobrar son pasos condicionales
+    con rollback; el cobro va al final."""
     db = get_db()
     user = await db.users.find_one({"wallet_address": wallet})
     if not user or user.get("tick_balance", 0) < settings.REBIRTH_COST:
@@ -170,18 +287,48 @@ async def rebirth(req: RebirthRequest, wallet: str = Depends(get_current_user)):
     if main.get("rebirths", 0) >= 5:
         raise HTTPException(status_code=400, detail="Máximo de renacimientos (5) alcanzado")
 
-    await db.users.update_one({"wallet_address": wallet},
-        {"$inc": {"tick_balance": -settings.REBIRTH_COST}})
-    await db.gladiators.update_one(
-        {"token_id": req.sacrifice_id},
-        {"$set": {"is_burned": True}},
-    )
     new_rebirths = main.get("rebirths", 0) + 1
-    await db.gladiators.update_one(
-        {"token_id": req.main_id},
-        {"$set": {"level": 1, "xp": 0, "rebirths": new_rebirths, "updated_at": datetime.utcnow()}},
+
+    # 1) Quemar el clon (Lv50, misma raza/linaje, del jugador).
+    got = await _burn_one(db, wallet, req.sacrifice_id, {
+        "level": 50, "race": main["race"], "lineage": main["lineage"],
+    })
+    if not got:
+        raise HTTPException(
+            status_code=400, detail="El clon ya no está disponible"
+        )
+
+    # 2) Renacer el principal, revalidando nivel y renacimientos.
+    main_res = await db.gladiators.update_one(
+        {"token_id": req.main_id, "owner_wallet": wallet,
+         "is_burned": False, "level": 50, "rebirths": main.get("rebirths", 0)},
+        {"$set": {"level": 1, "xp": 0, "rebirths": new_rebirths,
+                  "updated_at": datetime.utcnow()}},
     )
+    if main_res.modified_count == 0:
+        await _unburn(db, [req.sacrifice_id])
+        raise HTTPException(
+            status_code=400, detail="El gladiador principal cambió de estado"
+        )
+
+    # 3) Cobrar al final; si no hay saldo, deshacer todo.
+    if not await _charge_tick(db, wallet, settings.REBIRTH_COST):
+        await _unburn(db, [req.sacrifice_id])
+        await db.gladiators.update_one(
+            {"token_id": req.main_id},
+            {"$set": {"level": 50, "xp": main["xp"],
+                      "rebirths": main.get("rebirths", 0)}},
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Necesitas {settings.REBIRTH_COST} $TICK",
+        )
+
     await _log_forge_action(db, wallet, "rebirth")
+    logger.info(
+        "forge rebirth wallet=%s main=%s rebirths=%d tick=-%d",
+        wallet, req.main_id, new_rebirths, settings.REBIRTH_COST,
+    )
     return {
         "success":     True,
         "rebirths":    new_rebirths,

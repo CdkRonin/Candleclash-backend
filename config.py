@@ -72,6 +72,27 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+# ── Fail-fast de configuración ──────────────────────────────────────────────
+# El servidor NO arranca con secretos de ejemplo: si SECRET_KEY es la de
+# ejemplo (o está vacía) o MONGODB_URL es el placeholder, fallar con un
+# error claro en vez de arrancar inseguro. En local el .env válido
+# (nunca se sube: está en .gitignore) pone los valores reales; en
+# Render los ponen las variables de entorno. Sin esto, un despliegue
+# sin variables arrancaba con la clave JWT pública del ejemplo y una
+# URL de Mongo que no existe.
+if not settings.SECRET_KEY or settings.SECRET_KEY == "change-this-in-production":
+    raise RuntimeError(
+        "SECRET_KEY no válida: configura una SECRET_KEY real "
+        "(variable de entorno o .env). El valor de ejemplo "
+        "'change-this-in-production' no se permite."
+    )
+if not settings.MONGODB_URL or settings.MONGODB_URL == "mongodb+srv://user:pass@cluster.mongodb.net":
+    raise RuntimeError(
+        "MONGODB_URL no válida: configura la URL real de MongoDB Atlas "
+        "(variable de entorno o .env). El placeholder del ejemplo no se permite."
+    )
+
+
 # ── Mapeo cripto → atributo ──────────────────────────────────────────────────
 # Cada cripto impacta UN atributo específico del NFT que la lleva como linaje.
 # El bono = variación % a 24h × sensibilidad (0.5), clampeado a ±20%.

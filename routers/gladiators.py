@@ -1,3 +1,4 @@
+import logging
 import random
 import uuid
 from fastapi import APIRouter, HTTPException, Depends
@@ -5,9 +6,12 @@ from pydantic import BaseModel
 from typing import Optional
 from routers.auth import get_current_user
 from services.oracle_service import OracleService
+from services.rate_limit import wallet_rate_limit
 from database import get_db
 from models.gladiator import Gladiator, Rarity
 from config import RACE_MODIFIERS, CRYPTO_ATTRIBUTE_MAP
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -49,12 +53,17 @@ def sanitize_name(raw: Optional[str]) -> Optional[str]:
 
 
 @router.post("/mint")
-async def mint_gladiator(req: MintRequest, wallet: str = Depends(get_current_user)):
+async def mint_gladiator(
+    req: MintRequest,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(5, 60, "mint")),
+):
     """
     Recluta (crea) un gladiador Cobre nivel 1 para el usuario autenticado.
     Raza y linaje: los que mande el frontend si son válidos; si no, aleatorios.
     token_id es un uuid4 hasta que existan los contratos NFT.
     Límite: 2 gladiadores gratis por wallet (los existentes cuentan).
+    Límite de velocidad: 5/min por wallet.
     """
     db = get_db()
 
@@ -92,6 +101,10 @@ async def mint_gladiator(req: MintRequest, wallet: str = Depends(get_current_use
     doc = g.model_dump()
     await db.gladiators.insert_one(doc)
     doc.pop("_id", None)  # insert_one añade _id (ObjectId) al dict; no se serializa a JSON
+    logger.info(
+        "mint wallet=%s token=%s raza=%s linaje=%s nombre=%r",
+        wallet.lower(), doc["token_id"], race, lineage, doc.get("name"),
+    )
     oracle_mults = OracleService.get_cached_multipliers()
     return serialize_gladiator(doc, oracle_mults)
 
