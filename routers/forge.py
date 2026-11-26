@@ -260,7 +260,7 @@ async def rebirth(
     wallet: str = Depends(get_current_user),
     _limit=Depends(wallet_rate_limit(20, 60, "forge")),
 ):
-    """Renacimiento: NFT nivel 50 sacrifica clon idéntico nivel 50. Vuelve a Lv1 con +20% stats.
+    """Renacimiento: NFT nivel 50 sacrifica clon idéntico nivel 50. Vuelve a Lv1 con +50% stats.
     Igual que ascend: quemar, renacer y cobrar son pasos condicionales
     con rollback; el cobro va al final."""
     db = get_db()
@@ -332,6 +332,6 @@ async def rebirth(
     return {
         "success":     True,
         "rebirths":    new_rebirths,
-        "stat_bonus_pct": new_rebirths * 20,
+        "stat_bonus_pct": new_rebirths * 50,
         "tick_spent":  settings.REBIRTH_COST,
     }

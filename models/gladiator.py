@@ -77,7 +77,7 @@ class Gladiator(BaseModel):
         return 1 + (self.level - 1) * 0.07
 
     def rebirth_multiplier(self) -> float:
-        return 1 + self.rebirths * 0.20
+        return 1 + self.rebirths * 0.50
 
     def compute_stats(self, oracle_multipliers: dict) -> dict:
         """
