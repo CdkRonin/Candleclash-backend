@@ -24,6 +24,22 @@ MAX_ROUNDS = 25
 XP_WIN  = 40
 XP_LOSE = 20
 
+
+def battle_rewards(winner: str) -> dict:
+    """Recompensas de una batalla según el resultado.
+
+    Victoria: +25 trofeos. Derrota: -10. Empate: 0 trofeos y no cuenta
+    como derrota (antes el empate se trataba como derrota: -10 trofeos
+    y una derrota en el historial)."""
+    if winner == "p1":
+        return {"tick": random.randint(8, 30), "xp": XP_WIN,
+                "trophies": 25, "wins": 1, "losses": 0}
+    if winner == "draw":
+        return {"tick": 3, "xp": XP_LOSE,
+                "trophies": 0, "wins": 0, "losses": 0}
+    return {"tick": 3, "xp": XP_LOSE,
+            "trophies": -10, "wins": 0, "losses": 1}
+
 RARITY_ORDER = ["Cobre", "Bronce", "Plata", "Oro", "Diamante", "Legendario"]
 
 
@@ -295,6 +311,35 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
     }, log
 
 
+def generate_opponent(p1_gladiator, p1_stats, oracle_mults):
+    """Genera un oponente de poder SIMILAR al jugador: nivel ±5, rareza
+    del pool habitual, y la vida más cercana a la del jugador (dentro
+    del ±30% si se puede). Lo usan la batalla automática y el duelo
+    táctico. Antes este bucle vivía dentro de run_battle; al extraerlo
+    tal cual, la batalla automática no cambia (la cubren los E2E)."""
+    p1_hp = p1_stats["vida"]
+    opp = None
+    p2_stats = None
+    best_gap = None
+    for _ in range(40):
+        cand = Gladiator(
+            token_id="npc",
+            owner_wallet="system",
+            race=random.choice(["Orco", "Dracónido", "Minotauro", "Forjado", "Tiefling"]),
+            lineage=random.choice(list(oracle_mults.keys())),
+            rarity=random.choice(_opp_rarity_pool(p1_gladiator.rarity)),
+            level=max(1, min(50, p1_gladiator.level + random.randint(-5, 5))),
+        )
+        cand_stats = cand.compute_stats(oracle_mults)
+        gap = abs(cand_stats["vida"] - p1_hp) / max(1, p1_hp)
+        if best_gap is None or gap < best_gap:
+            opp, p2_stats, best_gap = cand, cand_stats, gap
+        if 0.70 <= cand_stats["vida"] / max(1, p1_hp) <= 1.30:
+            opp, p2_stats = cand, cand_stats
+            break
+    return opp, p2_stats
+
+
 async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
     """
     Endpoint principal de batalla:
@@ -328,31 +373,9 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
     p1_gladiator = Gladiator(**nft_doc)
     p1_stats = p1_gladiator.compute_stats(oracle_mults)
 
-    # Generar oponente de poder SIMILAR al jugador. Antes: nivel ±5 con
-    # rareza al azar, lo que daba peleas absurdas (p. ej. 12016 HP contra
-    # 3831 HP) sin explicación. Ahora se prueban candidatos (nivel ±5,
-    # rareza del pool habitual) y se queda el más cercano en vida; si
-    # uno cae dentro del ±30%, se toma ese.
-    p1_hp = p1_stats["vida"]
-    opp = None
-    p2_stats = None
-    best_gap = None
-    for _ in range(40):
-        cand = Gladiator(
-            token_id="npc",
-            owner_wallet="system",
-            race=random.choice(["Orco", "Dracónido", "Minotauro", "Forjado", "Tiefling"]),
-            lineage=random.choice(list(oracle_mults.keys())),
-            rarity=random.choice(_opp_rarity_pool(p1_gladiator.rarity)),
-            level=max(1, min(50, p1_gladiator.level + random.randint(-5, 5))),
-        )
-        cand_stats = cand.compute_stats(oracle_mults)
-        gap = abs(cand_stats["vida"] - p1_hp) / max(1, p1_hp)
-        if best_gap is None or gap < best_gap:
-            opp, p2_stats, best_gap = cand, cand_stats, gap
-        if 0.70 <= cand_stats["vida"] / max(1, p1_hp) <= 1.30:
-            opp, p2_stats = cand, cand_stats
-            break
+    # Generar oponente de poder SIMILAR al jugador (ver generate_opponent:
+    # nivel ±5, rareza del pool habitual, vida dentro del ±30% si se puede).
+    opp, p2_stats = generate_opponent(p1_gladiator, p1_stats, oracle_mults)
     opp_lineage = opp.lineage
     opp_rarity = opp.rarity
     opp_level = opp.level
@@ -361,10 +384,12 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
     result, log = simulate_battle(p1_stats, p2_stats)
     player_won = result["winner"] == "p1"
 
-    # Recompensas
-    tick_reward  = random.randint(8, 30) if player_won else 3
-    xp_gained    = XP_WIN if player_won else XP_LOSE
-    trophy_delta = 25 if player_won else -10
+    # Recompensas (ver battle_rewards: el empate no quita trofeos
+    # ni cuenta como derrota).
+    rewards = battle_rewards(result["winner"])
+    tick_reward = rewards["tick"]
+    xp_gained = rewards["xp"]
+    trophy_delta = rewards["trophies"]
 
     # Energía regenerada hasta ahora (lectura con persistencia, como
     # siempre: la regeneración se calcula al leer, sin jobs).
@@ -382,8 +407,8 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
             "energy": -1,
             "tick_balance": tick_reward,
             "trophies":     trophy_delta,
-            "wins":         1 if player_won else 0,
-            "losses":       0 if player_won else 1,
+            "wins":         rewards["wins"],
+            "losses":       rewards["losses"],
         }},
     )
     if applied.modified_count == 0:
@@ -392,6 +417,14 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
         raise NoEnergyError(
             f"Sin energía. Próxima energía en {state['minutes_to_next']} min."
         )
+    # Piso de trofeos: nunca por debajo de 0. Va en una segunda
+    # actualización porque $inc y $max no pueden tocar el mismo campo
+    # en una sola (MongoDB lo rechaza con "conflict at 'trophies'",
+    # verificado en local el 2026-11-26).
+    await db.users.update_one(
+        {"wallet_address": player_wallet.lower()},
+        {"$max": {"trophies": 0}},
+    )
     # Energía restante y minutos con la energía YA descontada (igual
     # que hacía consume_energy: con energía llena, la próxima en 30 min).
     post_state = compute_energy({
@@ -474,6 +507,7 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
             "rarity":  opp.rarity,
             "level":   opp.level,
             "vida":    p2_stats["vida"],
+            "max_hp":  p2_stats["vida"],
             "atq":     p2_stats["atq_fisico"],
             "display_name": opp.display_name(),
             "ability": opp.ability_info(),
