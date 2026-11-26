@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from routers.auth import get_current_user
 from services.battle_service import run_battle, NoEnergyError
+from services.duel_service import start_duel, act_duel, get_duel
 from services.rate_limit import wallet_rate_limit
 from database import get_db
 
@@ -10,6 +11,15 @@ router = APIRouter()
 
 class BattleRequest(BaseModel):
     gladiator_id: str   # token_id del NFT que peleará
+
+
+class DuelStartRequest(BaseModel):
+    gladiator_id: str   # token_id del NFT que peleará
+
+
+class DuelActRequest(BaseModel):
+    duel_id: str
+    action: str   # attack | ability | defend
 
 
 @router.post("/fight")
@@ -44,6 +54,57 @@ async def fight(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return result
+
+
+@router.post("/duel/start")
+async def duel_start(
+    req: DuelStartRequest,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(5, 60, "duel_start")),
+):
+    """Crea un duelo táctico (por turnos) con matchmaking del servidor.
+
+    Cuesta 1 energía, como la batalla automática. Sin energía responde
+    403. Devuelve el estado inicial del duelo y el oponente.
+    Límite: 5/min por wallet.
+    """
+    try:
+        return await start_duel(wallet, req.gladiator_id)
+    except NoEnergyError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/duel/act")
+async def duel_act(
+    req: DuelActRequest,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(30, 60, "duel_act")),
+):
+    """Resuelve una ronda del duelo con la acción elegida por el jugador
+    (attack | ability | defend). El rival responde con su IA y el
+    servidor devuelve el log de la ronda y el estado nuevo. Si la
+    acción no se puede hacer (habilidad en enfriamiento o cura con la
+    vida llena) responde 400 y la ronda no se consume.
+    Límite: 30/min por wallet.
+    """
+    try:
+        return await act_duel(wallet, req.duel_id, req.action)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/duel/{duel_id}")
+async def duel_state(
+    duel_id: str,
+    wallet: str = Depends(get_current_user),
+):
+    """Estado actual de un duelo del jugador (para reconectar)."""
+    try:
+        return await get_duel(wallet, duel_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/history")
