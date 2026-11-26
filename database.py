@@ -36,6 +36,9 @@ async def connect_db():
         [("wallet_address", 1), ("mission_id", 1), ("date", 1)], unique=True)
     await db.forge_actions.create_index([("wallet_address", 1), ("timestamp", -1)])
     await db.battles.create_index([("player_wallet", 1), ("timestamp", -1)])
+    # Duelos tácticos: un documento por duelo, con su estado por rondas.
+    await db.duels.create_index("duel_id", unique=True)
+    await db.duels.create_index([("player_wallet", 1), ("status", 1)])
     print("✅ MongoDB conectado")
 
 
