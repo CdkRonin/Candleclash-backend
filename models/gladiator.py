@@ -99,20 +99,29 @@ class Gladiator(BaseModel):
         # Obtener el bono del oráculo para este linaje
         oracle_mult = oracle_multipliers.get(self.lineage, 1.0)
 
-        from config import CRYPTO_ATTRIBUTE_MAP, RACE_MODIFIERS
+        from config import CRYPTO_ATTRIBUTE_MAP, RACE_MODIFIERS, STAT_UNLOCK_LEVEL
         lineage_attr = CRYPTO_ATTRIBUTE_MAP.get(self.lineage, {}).get("attribute")
         race_mods = RACE_MODIFIERS.get(self.race, {})
+
+        def unlocked(stat: str) -> bool:
+            """El stat existe a partir de su nivel de desbloqueo
+            (STAT_UNLOCK_LEVEL); por debajo vale 0 en pelea."""
+            return self.level >= STAT_UNLOCK_LEVEL.get(stat, 1)
 
         def race_mult(stat: str) -> float:
             return race_mods.get(stat, 1.0)
 
         def apply(val, stat: str, is_lineage_attr=False):
+            if not unlocked(stat):
+                return 0
             computed = round(val * race_mult(stat) * total)
             if is_lineage_attr:
                 computed = round(computed * oracle_mult)
             return max(1, computed)
 
         def apply_prob(val, stat: str, cap: float):
+            if not unlocked(stat):
+                return 0
             mult = race_mult(stat) * (oracle_mult if lineage_attr == stat else 1.0)
             return round(min(cap, val * mult), 3)
 
@@ -121,8 +130,8 @@ class Gladiator(BaseModel):
             "lineage":      self.lineage,
             "vida":         apply(base.vida,         "vida",         lineage_attr == "vida"),
             "atq_fisico":   apply(base.atq_fisico,   "atq_fisico",   lineage_attr == "atq_fisico"),
-            "defensa":      apply(base.defensa,       "defensa",       lineage_attr == "defensa") if self.level >= 10 else 0,
-            "vel_ataque":   apply(base.vel_ataque,    "vel_ataque",    lineage_attr == "vel_ataque") if self.level >= 25 else 0,
+            "defensa":      apply(base.defensa,       "defensa",       lineage_attr == "defensa"),
+            "vel_ataque":   apply(base.vel_ataque,    "vel_ataque",    lineage_attr == "vel_ataque"),
             "recuperacion": apply(base.recuperacion,  "recuperacion",  lineage_attr == "recuperacion"),
             "vel_recup":    apply(base.vel_recup,     "vel_recup",     lineage_attr == "vel_recup"),
             "prioridad":    apply(base.prioridad,     "prioridad",     lineage_attr == "prioridad"),

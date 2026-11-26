@@ -37,18 +37,45 @@ def _opp_rarity_pool(player_rarity: str) -> list:
     return pool + pool[:-1] if len(pool) > 1 else pool
 
 
+def _vel_recup_reduction(stats: dict) -> int:
+    """vel_recup (LTC, Nv50): la habilidad se recarga más rápido.
+    Cada 75 puntos quitan 1 ronda de enfriamiento, con tope de 2."""
+    return min(2, stats.get("vel_recup", 0) // 75)
+
+
+def _crit_mult(stats: dict) -> float:
+    """critico (LINK, Nv30): los críticos pegan más fuerte. Con
+    critico 10 (base) el multiplicador es el de siempre, ×2.1; crece
+    0.01 por punto extra, con tope ×3.0."""
+    return min(3.0, 2.1 + max(0, stats.get("critico", 0) - 10) / 100)
+
+
+def _first_attacker(p1: dict, p2: dict) -> tuple:
+    """Quién ataca primero en la ronda: mayor vel_ataque; en empate,
+    mayor prioridad (XRP, Nv20); en empate total, el jugador (p1)."""
+    if p1["stats"]["vel_ataque"] != p2["stats"]["vel_ataque"]:
+        return (p1, p2) if p1["stats"]["vel_ataque"] > p2["stats"]["vel_ataque"] else (p2, p1)
+    if p1["stats"].get("prioridad", 0) != p2["stats"].get("prioridad", 0):
+        return (p1, p2) if p1["stats"]["prioridad"] > p2["stats"]["prioridad"] else (p2, p1)
+    return (p1, p2)
+
+
 def _fighter_state(stats: dict, is_p1: bool) -> dict:
     """Estado de un luchador en la batalla: stats, habilidad de su raza
     (config.RACE_ABILITIES) y enfriamiento. El enfriamiento empieza en 0,
     así que la habilidad se dispara en el primer ataque de la ronda 1."""
+    ability = ability_for_race(stats.get("race", "Humano"))
     return {
         "stats": stats,
         "is_p1": is_p1,
         "cd": 0,
+        # Enfriamiento efectivo: vel_recup (Nv50) lo acorta.
+        "cd_max": max(1, ability["cooldown"] - _vel_recup_reduction(stats)),
         "block_next": False,   # la habilidad de bloqueo protege del próximo ataque
         "reduce_next": False,  # la habilidad de reducción amortigua el próximo ataque
-        "ability": ability_for_race(stats.get("race", "Humano")),
+        "ability": ability,
         "max_hp": stats["vida"],
+        "strikes": 0,  # golpes dados: cada 3º lleva daño mágico
     }
 
 
@@ -63,12 +90,32 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
     El efecto se aplica en el servidor y queda en el log con
     type "ability" (nombre de la habilidad, quién la usó y su efecto).
     La batalla sigue siendo automática: el jugador no decide nada.
+
+    Stats por nivel (config.STAT_UNLOCK_LEVEL, 15 stats ↔ 15 criptos):
+    cada stat se desbloquea a un nivel y solo entonces actúa en pelea:
+    prioridad (Nv20) desempata quién pega primero; critico (Nv30) sube
+    el multiplicador de crítico; atq_magico/def_magica (Nv35) añaden
+    daño mágico cada 3er golpe; bloqueo (Nv40) resta daño fijo por
+    golpe; recuperacion (Nv45) regenera vida cada ronda; vel_recup
+    (Nv50) acorta el enfriamiento de la habilidad. La cura de habilidad
+    no se gasta con la vida llena: se guarda para cuando haya daño.
     """
     p1 = _fighter_state(attacker, True)
     p2 = _fighter_state(defender, False)
     p1_hp = attacker["vida"]
     p2_hp = defender["vida"]
     log = []
+
+    def regen(st, hp):
+        """Regeneración (DOGE, Nv45): el luchador recupera vida al
+        empezar la ronda. Solo se registra si cura algo (en ronda 1,
+        con la vida llena, no hay nada que curar)."""
+        amount = int(st["stats"].get("recuperacion", 0) * 0.30)
+        healed = min(amount, st["max_hp"] - hp) if amount > 0 else 0
+        if healed > 0:
+            log.append({"round": battle_round[0], "type": "regen",
+                        "attacker": st["stats"]["race"], "healed": healed})
+        return hp + healed
 
     def ability_entry(rnd, att, ability, **extra):
         entry = {
@@ -93,11 +140,15 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
         extra = False
 
         # Habilidad: se dispara al atacar, si el enfriamiento está listo.
+        # La cura no se desperdicia con la vida llena: si no hay nada que
+        # curar, no se gasta el uso y se dispara en el próximo ataque.
         if allow_ability and att["cd"] == 0:
             ability = att["ability"]
-            att["cd"] = ability["cooldown"]
             kind = ability["kind"]
-            if kind == "heal":
+            cast = not (kind == "heal" and hp_att >= att["max_hp"])
+            if cast:
+                att["cd"] = att["cd_max"]
+            if kind == "heal" and cast:
                 amount = min(int(att["max_hp"] * ability["value"]),
                              att["max_hp"] - hp_att)
                 hp_att = min(att["max_hp"], hp_att + amount)
@@ -135,12 +186,25 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
                             "attacker": att["stats"]["race"], "defender": dfn["stats"]["race"]})
                 return hp_att, hp_dfn  # Sin daño
 
+            # Daño físico: ataque menos defensa, y bloqueo (XAU, Nv40)
+            # resta una cantidad fija por golpe.
             dmg = max(5, int(
                 att["stats"]["atq_fisico"] * (0.80 + random.random() * 0.45)
                 - dfn["stats"]["defensa"] * 0.55
+                - dfn["stats"].get("bloqueo", 0) * 0.30
             ))
             if crit:
-                dmg = int(dmg * 2.1)
+                dmg = int(dmg * _crit_mult(att["stats"]))
+            # Daño mágico (AVAX/TRX, Nv35): cada 3er golpe del atacante
+            # suma un extra mágico (atq_magico menos def_magica).
+            magic = 0
+            att["strikes"] += 1
+            if att["strikes"] % 3 == 0 and att["stats"].get("atq_magico", 0) > 0:
+                magic = max(0, int(
+                    att["stats"]["atq_magico"]
+                    - dfn["stats"].get("def_magica", 0) * 0.55
+                ))
+                dmg += magic
             if dmg_mult != 1.0:
                 dmg = int(dmg * dmg_mult)
             # Reducción por habilidad: el ataque hace (1 − value) de daño.
@@ -154,7 +218,7 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
             hp_dfn = max(0, hp_dfn - dmg)
             hp_att = max(0, hp_att - reflected)
 
-            log.append({
+            entry = {
                 "round":     rnd,
                 "type":      "crit" if crit else "reflect" if reflect else "normal",
                 "attacker":  att["stats"]["race"],
@@ -162,7 +226,10 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
                 "damage":    dmg,
                 "reflected": reflected,
                 "crit":      crit,
-            })
+            }
+            if magic:
+                entry["magic"] = magic
+            log.append(entry)
             return hp_att, hp_dfn
 
         hp_att, hp_dfn = strike(hp_att, hp_dfn, force_crit, dmg_mult)
@@ -179,8 +246,12 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
         for st in (p1, p2):
             if st["cd"] > 0:
                 st["cd"] -= 1
-        # Orden de ataque: mayor vel_ataque va primero
-        first, second = (p1, p2) if p1["stats"]["vel_ataque"] >= p2["stats"]["vel_ataque"] else (p2, p1)
+        # Regeneración (DOGE, Nv45) al empezar la ronda.
+        p1_hp = regen(p1, p1_hp)
+        p2_hp = regen(p2, p2_hp)
+        # Orden de ataque: mayor vel_ataque va primero; en empate decide
+        # prioridad (XRP, Nv20) y si también empata, el jugador (p1).
+        first, second = _first_attacker(p1, p2)
         first_is_p1 = first is p1
 
         # Primer atacante

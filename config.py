@@ -116,6 +116,49 @@ CRYPTO_ATTRIBUTE_MAP = {
     "XAU":  {"attribute": "bloqueo",      "tier": "Comun",      "sensitivity": 0.2},
 }
 
+# ── Desbloqueo de stats por nivel ─────────────────────────────────────────
+# Los 15 stats del gladiador, uno por cada una de las 15 criptos del
+# oráculo (CRYPTO_ATTRIBUTE_MAP): cada linaje sube UN stat con el precio
+# en vivo de su cripto, y cada stat se DESBLOQUEA a un nivel (máx. 50).
+# Por debajo de su nivel, el stat vale 0 en compute_stats: no existe en
+# la pelea. Antes solo defensa (Nv10) y vel_ataque (Nv25) estaban
+# bloqueados; los otros 7 stats que la batalla no leía (atq_magico,
+# def_magica, recuperacion, vel_recup, prioridad, critico, bloqueo)
+# se calculaban desde Nv1 sin hacer nada. Ahora cada uno tiene su nivel
+# y su efecto en el motor (services/battle_service.py), así que subir de
+# nivel desbloquea mecánicas nuevas. La escalera se midió con la
+# auditoría de balance: prob_bloqueo y reflejo quedan en Nv1 porque son
+# el kit defensivo base (bloquearlos a Nv5 dejaba al Orco en 90% en Nv1),
+# y atq_magico (Nv30) llega antes que def_magica (Nv35) para que haya
+# una ventana en la que la magia pega sin resistencia.
+#   Nv 1: vida (ETH), atq_fisico (BTC), prob_critico (ADA),
+#         prob_bloqueo (SUI), reflejo (SHIB) — el kit base
+#   Nv 5: prob_reflejo (DOT) — el reflejo entra en juego
+#   Nv10: defensa (BNB) — ya existía
+#   Nv15: critico (LINK) — los críticos pegan más fuerte
+#   Nv20: prioridad (XRP) — decide quién pega primero en empates
+#   Nv25: vel_ataque (SOL) — ya existía
+#   Nv30: atq_magico (AVAX) — ataques mágicos
+#   Nv35: def_magica (TRX) — resistencia a la magia
+#   Nv40: bloqueo (XAU) — reducción fija por golpe
+#   Nv45: recuperacion (DOGE) — regenerar vida cada ronda
+#   Nv50: vel_recup (LTC) — las habilidades se recargan más rápido
+STAT_UNLOCK_LEVEL = {
+    "vida": 1, "atq_fisico": 1, "prob_critico": 1,
+    "prob_bloqueo": 1, "reflejo": 1,
+    "prob_reflejo": 5,
+    "defensa": 10,
+    "critico": 15,
+    "prioridad": 20,
+    "vel_ataque": 25,
+    "atq_magico": 30,
+    "def_magica": 35,
+    "bloqueo": 40,
+    "recuperacion": 45,
+    "vel_recup": 50,
+}
+
+
 # ── Modificadores por raza ──────────────────────────────────────────────────
 # Cada raza sube 2 stats y baja 1, para que ninguna domine en todo y cada
 # jugador pueda armar su build. Los valores son multiplicadores sobre el stat
@@ -124,21 +167,29 @@ CRYPTO_ATTRIBUTE_MAP = {
 # Los stats no listados quedan en 1.0 (sin cambio). Una raza desconocida
 # queda en 1.0 en todo, así los gladiadores viejos siguen funcionando.
 RACE_MODIFIERS = {
+    # Rebalance 2026-11-25 (auditoría de balance + sistema de desbloqueo):
+    # cada raza sube 2 stats que la batalla SÍ usa y baja 1 que también
+    # usa, para que la ventaja y la desventaja sean reales. La tabla
+    # anterior subía stats que el motor no leía (atq_magico, recuperacion,
+    # vel_recup, prioridad, critico, def_magica, bloqueo): el Mediano
+    # pagaba -10% de ataque por mejoras fantasma y el H.Lagarto no ganaba
+    # nada. Medida en la auditoría (round-robin 200 reps/par, Lv25
+    # Bronce): el rango pasó de 23–81% a 34–65% con esta tabla.
     "Humano":     {"vida": 1.10, "atq_fisico": 1.10, "vel_ataque": 0.95},
     "Elfo":       {"vel_ataque": 1.20, "prob_critico": 1.20, "vida": 0.90},
-    "Enano":      {"defensa": 1.20, "bloqueo": 1.20, "vel_ataque": 0.90},
-    "Orco":       {"atq_fisico": 1.20, "vida": 1.15, "def_magica": 0.90},
-    "Goblin":     {"prioridad": 1.20, "critico": 1.20, "defensa": 0.90},
-    "Mediano":    {"prob_reflejo": 1.20, "vel_recup": 1.15, "atq_fisico": 0.90},
-    "Gnomo":      {"atq_magico": 1.20, "prob_critico": 1.10, "vida": 0.90},
-    "Dracónido":  {"atq_fisico": 1.15, "atq_magico": 1.15, "vel_ataque": 0.90},
-    "Tiefling":   {"atq_magico": 1.20, "critico": 1.15, "defensa": 0.90},
-    "H.Lagarto":  {"recuperacion": 1.20, "vel_recup": 1.15, "atq_magico": 0.90},
+    "Enano":      {"defensa": 1.20, "prob_bloqueo": 1.20, "vel_ataque": 0.90},
+    "Orco":       {"atq_fisico": 1.15, "vida": 1.10, "vel_ataque": 0.90},
+    "Goblin":     {"vel_ataque": 1.20, "prob_critico": 1.20, "defensa": 0.90},
+    "Mediano":    {"prob_reflejo": 1.20, "prob_bloqueo": 1.15, "vel_ataque": 0.95},
+    "Gnomo":      {"vel_ataque": 1.20, "prob_critico": 1.20, "defensa": 0.90},
+    "Dracónido":  {"atq_fisico": 1.15, "vida": 1.10, "vel_ataque": 0.90},
+    "Tiefling":   {"prob_critico": 1.20, "vel_ataque": 1.15, "defensa": 0.90},
+    "H.Lagarto":  {"vida": 1.15, "defensa": 1.10, "vel_ataque": 0.90},
     "Tabaxi":     {"vel_ataque": 1.20, "prioridad": 1.15, "defensa": 0.90},
     "Minotauro":  {"vida": 1.20, "atq_fisico": 1.10, "vel_ataque": 0.90},
-    "Forjado":    {"defensa": 1.20, "vida": 1.10, "vel_recup": 0.90},
-    "Cíborg":     {"prob_bloqueo": 1.20, "defensa": 1.10, "recuperacion": 0.90},
-    "Alienígena": {"atq_magico": 1.15, "reflejo": 1.20, "atq_fisico": 0.90},
+    "Forjado":    {"defensa": 1.20, "vida": 1.10, "vel_ataque": 0.90},
+    "Cíborg":     {"prob_bloqueo": 1.20, "defensa": 1.10, "vel_ataque": 0.95},
+    "Alienígena": {"reflejo": 1.20, "prob_critico": 1.20, "defensa": 0.90},
 }
 
 # IDs de CoinGecko para cada cripto
@@ -254,8 +305,8 @@ RACE_ABILITIES = {
     "Enano":      {"id": "muro_piedra",        "nombre": "Muro de Piedra",     "descripcion": "Bloquea por completo el próximo ataque enemigo.",  "kind": "block",        "value": None, "cooldown": 4},
     "Orco":       {"id": "furia_salvaje",      "nombre": "Furia Salvaje",      "descripcion": "Daño ×1.5 en el próximo ataque.",                  "kind": "damage_mult",  "value": 1.5,  "cooldown": 5},
     "Goblin":     {"id": "punalada_rapida",    "nombre": "Puñalada Rápida",    "descripcion": "Ataca una vez más en esta misma ronda.",           "kind": "extra_attack", "value": None, "cooldown": 5},
-    "Mediano":    {"id": "suerte_mediana",     "nombre": "Suerte Mediana",     "descripcion": "Recupera 10% de su vida máxima.",                  "kind": "heal",         "value": 0.10, "cooldown": 4},
-    "Gnomo":      {"id": "chispa_arcana",      "nombre": "Chispa Arcana",      "descripcion": "Daño mágico: +40% de daño en el próximo ataque.",  "kind": "damage_mult",  "value": 1.4,  "cooldown": 4},
+    "Mediano":    {"id": "suerte_mediana",     "nombre": "Suerte Mediana",     "descripcion": "Recupera 15% de su vida máxima.",                  "kind": "heal",         "value": 0.15, "cooldown": 4},
+    "Gnomo":      {"id": "chispa_arcana",      "nombre": "Chispa Arcana",      "descripcion": "Daño mágico: +50% de daño en el próximo ataque.",  "kind": "damage_mult",  "value": 1.5,  "cooldown": 4},
     "Dracónido":  {"id": "aliento_dragon",     "nombre": "Aliento de Dragón",  "descripcion": "Daño ×1.5 en el próximo ataque.",                  "kind": "damage_mult",  "value": 1.5,  "cooldown": 5},
     "Tiefling":   {"id": "pacto_infernal",     "nombre": "Pacto Infernal",     "descripcion": "El próximo ataque siempre es crítico.",            "kind": "crit",         "value": None, "cooldown": 4},
     "H.Lagarto":  {"id": "regeneracion",       "nombre": "Regeneración",       "descripcion": "Recupera 15% de su vida máxima.",                  "kind": "heal",         "value": 0.15, "cooldown": 5},
@@ -263,7 +314,7 @@ RACE_ABILITIES = {
     "Minotauro":  {"id": "embestida",          "nombre": "Embestida",          "descripcion": "Daño ×1.5 en el próximo ataque.",                  "kind": "damage_mult",  "value": 1.5,  "cooldown": 5},
     "Forjado":    {"id": "armadura_reforzada", "nombre": "Armadura Reforzada", "descripcion": "El próximo ataque enemigo hace la mitad de daño.", "kind": "reduce",       "value": 0.5,  "cooldown": 4},
     "Cíborg":     {"id": "escudo_energia",     "nombre": "Escudo de Energía",  "descripcion": "Bloquea por completo el próximo ataque enemigo.",  "kind": "block",        "value": None, "cooldown": 4},
-    "Alienígena": {"id": "mente_colmena",      "nombre": "Mente Colmena",      "descripcion": "Recupera 10% de su vida máxima.",                  "kind": "heal",         "value": 0.10, "cooldown": 4},
+    "Alienígena": {"id": "mente_colmena",      "nombre": "Mente Colmena",      "descripcion": "Recupera 15% de su vida máxima.",                  "kind": "heal",         "value": 0.15, "cooldown": 4},
 }
 
 
