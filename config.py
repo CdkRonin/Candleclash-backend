@@ -12,11 +12,6 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 días
 
-    # Admin temporal (2026-11-25): token de un solo uso para crear los
-    # gladiadores de prueba de la Forja (routers/admin.py). Vacío = el
-    # endpoint no existe. Se borra tras usarlo; nunca va en el repo.
-    ADMIN_GRANT_TOKEN: str = ""
-
     # CoinGecko
     COINGECKO_API_KEY: str = ""          # Vacío = free tier (50 req/min)
     ORACLE_REFRESH_SECONDS: int = 14400  # 4 horas
