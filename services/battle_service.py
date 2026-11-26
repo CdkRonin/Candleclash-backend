@@ -99,6 +99,12 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
     golpe; recuperacion (Nv45) regenera vida cada ronda; vel_recup
     (Nv50) acorta el enfriamiento de la habilidad. La cura de habilidad
     no se gasta con la vida llena: se guarda para cuando haya daño.
+
+    Cada entrada del log lleva "side" ("p1" o "p2", el bando del
+    atacante): el frontend NO puede deducir el bando por la raza,
+    porque el rival puede ser de la misma raza que el jugador y
+    entonces todos los golpes parecían del jugador, la barra del rival
+    bajaba el doble de rápido y seguía recibiendo golpes tras morir.
     """
     p1 = _fighter_state(attacker, True)
     p2 = _fighter_state(defender, False)
@@ -114,7 +120,9 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
         healed = min(amount, st["max_hp"] - hp) if amount > 0 else 0
         if healed > 0:
             log.append({"round": battle_round[0], "type": "regen",
-                        "attacker": st["stats"]["race"], "healed": healed})
+                        "attacker": st["stats"]["race"],
+                        "side": "p1" if st["is_p1"] else "p2",
+                        "healed": healed})
         return hp + healed
 
     def ability_entry(rnd, att, ability, **extra):
@@ -122,6 +130,7 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
             "round": rnd,
             "type": "ability",
             "attacker": att["stats"]["race"],
+            "side": "p1" if att["is_p1"] else "p2",
             "ability": ability["nombre"],
             "ability_id": ability["id"],
             "effect": ability["kind"],
@@ -176,14 +185,18 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
             if dfn["block_next"]:
                 dfn["block_next"] = False
                 log.append({"round": rnd, "type": "block",
-                            "attacker": att["stats"]["race"], "defender": dfn["stats"]["race"]})
+                            "attacker": att["stats"]["race"],
+                            "side": "p1" if att["is_p1"] else "p2",
+                            "defender": dfn["stats"]["race"]})
                 return hp_att, hp_dfn
             block = random.random() < dfn["stats"].get("prob_bloqueo", 0.10)
             reflect = random.random() < dfn["stats"].get("prob_reflejo", 0.08)
 
             if block:
                 log.append({"round": rnd, "type": "block",
-                            "attacker": att["stats"]["race"], "defender": dfn["stats"]["race"]})
+                            "attacker": att["stats"]["race"],
+                            "side": "p1" if att["is_p1"] else "p2",
+                            "defender": dfn["stats"]["race"]})
                 return hp_att, hp_dfn  # Sin daño
 
             # Daño físico: ataque menos defensa, y bloqueo (XAU, Nv40)
@@ -222,6 +235,7 @@ def simulate_battle(attacker: dict, defender: dict) -> tuple[dict, list]:
                 "round":     rnd,
                 "type":      "crit" if crit else "reflect" if reflect else "normal",
                 "attacker":  att["stats"]["race"],
+                "side":      "p1" if att["is_p1"] else "p2",
                 "defender":  dfn["stats"]["race"],
                 "damage":    dmg,
                 "reflected": reflected,
