@@ -39,6 +39,13 @@ async def connect_db():
     # Duelos tácticos: un documento por duelo, con su estado por rondas.
     await db.duels.create_index("duel_id", unique=True)
     await db.duels.create_index([("player_wallet", 1), ("status", 1)])
+    # Coliseo táctico: un documento por evento. Solo puede haber un
+    # coliseo activo a la vez (índice único parcial sobre status).
+    await db.coliseums.create_index("coliseum_id", unique=True)
+    await db.coliseums.create_index(
+        "status", unique=True,
+        partialFilterExpression={"status": "active"})
+    await db.coliseums.create_index([("status", 1), ("created_at", -1)])
     print("✅ MongoDB conectado")
 
 
