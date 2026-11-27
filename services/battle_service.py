@@ -10,6 +10,7 @@ from datetime import datetime
 from models.gladiator import Gladiator
 from services.oracle_service import OracleService
 from services.energy_service import refresh_energy, compute_energy
+from services.tick_service import ensure_tick_split
 from config import ability_for_race
 from database import get_db
 
@@ -401,11 +402,14 @@ async def run_battle(player_wallet: str, gladiator_id: str) -> dict:
         )
 
     # UNA sola actualización atómica: energía + recompensas juntas.
+    # El $TICK de batalla es ganado (a tick_earned, no a tick_bought).
+    await ensure_tick_split(db, player_wallet)
     applied = await db.users.update_one(
         {"wallet_address": player_wallet.lower(), "energy": {"$gte": 1}},
         {"$inc": {
             "energy": -1,
             "tick_balance": tick_reward,
+            "tick_earned": tick_reward,
             "trophies":     trophy_delta,
             "wins":         rewards["wins"],
             "losses":       rewards["losses"],
