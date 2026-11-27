@@ -6,6 +6,7 @@ from pymongo import ReturnDocument
 from typing import List
 from routers.auth import get_current_user
 from services.rate_limit import wallet_rate_limit
+from services.tick_service import ensure_tick_split, split_tick
 from database import get_db
 from config import settings
 from datetime import datetime
@@ -76,12 +77,38 @@ async def _unburn(db, token_ids: list):
 async def _charge_tick(db, wallet: str, cost: int) -> bool:
     """Cobra $TICK solo si el saldo cubre (atómico con $gte). True si
     cobró; False si no había saldo (otra petición simultánea se lo
-    llevó primero)."""
-    res = await db.users.update_one(
-        {"wallet_address": wallet, "tick_balance": {"$gte": cost}},
-        {"$inc": {"tick_balance": -cost}},
-    )
-    return res.modified_count == 1
+    llevó primero).
+
+    Gasta primero el $TICK ganado y luego el comprado
+    (ver services/tick_service.py). El filtro revalida saldo y
+    separación leídos: si otra operación cambió el saldo entre la
+    lectura y el cobro, no aplica y se reintenta (hasta 3 veces);
+    si agota los reintentos devuelve False y la forja revierte,
+    igual que con saldo insuficiente."""
+    for _ in range(3):
+        user = await db.users.find_one({"wallet_address": wallet})
+        if not user:
+            return False
+        if user.get("tick_bought") is None or user.get("tick_earned") is None:
+            user = await ensure_tick_split(db, wallet, user)
+        balance = int(user.get("tick_balance", 0))
+        if balance < cost:
+            return False
+        bought, earned = split_tick(user)
+        from_earned = min(cost, earned)
+        from_bought = cost - from_earned
+        res = await db.users.update_one(
+            {"wallet_address": wallet,
+             "tick_balance": balance,
+             "tick_bought": bought,
+             "tick_earned": earned},
+            {"$inc": {"tick_balance": -cost,
+                      "tick_earned": -from_earned,
+                      "tick_bought": -from_bought}},
+        )
+        if res.modified_count == 1:
+            return True
+    return False
 
 
 @router.post("/ascend")
