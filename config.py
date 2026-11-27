@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     # Economía
     TICK_BUY_RATE: float = 10.0     # 1 USDT = 10 $TICK
     TICK_SELL_RATE: float = 0.08    # 10 $TICK = 0.80 USDT
+    # Venta de $TICK (decisión 2026-11-26): el comprado se vende libre,
+    # sin tope; el ganado tiene tope diario y una ventana mensual que
+    # cubre el exceso. Ver services/tick_service.py.
+    TICK_EARNED_DAILY_SELL_CAP: int = 17   # $TICK ganado vendible por día
+    TICK_EARNED_MONTHLY_WINDOW: int = 500  # $TICK ganado extra vendible al mes
     FORGE_ASCEND_COST: int = 50     # $TICK para ascender rareza
     FORGE_FEED_COST: int = 0        # Gratis alimentar (solo NFT sacrificio)
     REBIRTH_COST: int = 100         # $TICK para renacimiento
