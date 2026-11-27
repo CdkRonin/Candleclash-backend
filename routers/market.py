@@ -7,7 +7,9 @@ from pydantic import BaseModel
 from pymongo import ReturnDocument
 from routers.auth import get_current_user
 from services.rate_limit import wallet_rate_limit
-from services.tick_service import apply_sale, ensure_tick_split
+from services.tick_service import (
+    apply_sale, apply_window_sale, ensure_tick_split,
+)
 from database import get_db
 from config import (
     settings,
@@ -330,11 +332,15 @@ async def sell_tick(
     """Vende $TICK por USDT con fee del 20%.
 
     El comprado se vende libre, sin tope. El ganado tiene tope diario
-    de 17/día y una ventana mensual de 500 que cubre el exceso
-    (ver services/tick_service.py). Si ni el día ni la ventana
-    alcanzan, se rechaza TODA la venta con 400 y el mensaje dice
-    cuánto se puede vender. El débito y los contadores se actualizan
-    en una sola operación atómica (apply_sale)."""
+    de 17/día como MURO DURO (decisión 2026-11-27): la venta normal
+    nunca pasa de él. La ventana mensual de 500 es un proceso aparte
+    (POST /api/market/tick/sell-window, ver services/tick_service.py).
+    Si el monto supera lo vendible con el tope diario, se rechaza
+    TODA la venta con 400 y el mensaje dice cuánto se puede vender
+    y que la ventana es un proceso aparte. El débito y el contador
+    del tope diario se actualizan en una sola operación atómica
+    (apply_sale). La respuesta trae window_remaining solo como dato
+    informativo (la venta normal no la usa ni la toca)."""
     if req.tick_amount < 10:
         raise HTTPException(status_code=400, detail="Mínimo 10 $TICK")
     db = get_db()
@@ -345,18 +351,55 @@ async def sell_tick(
         raise HTTPException(status_code=400, detail=str(e))
     logger.info(
         "market tick/sell wallet=%s tick=-%d usdt=+%.2f "
-        "(comprado=%d diario=%d ventana=%d)",
+        "(comprado=%d diario=%d)",
         wallet, req.tick_amount, usdt_received,
         result["from_bought"], result["from_earned_daily"],
-        result["from_earned_window"],
     )
     return {
         "usdt_received": usdt_received,
         "tick_sold": req.tick_amount,
         "sold_from_bought": result["from_bought"],
         "sold_from_earned_daily": result["from_earned_daily"],
-        "sold_from_earned_window": result["from_earned_window"],
+        "sold_from_earned_window": 0,
         "earned_daily_remaining": result["earned_daily_remaining_after"],
+        "window_remaining": result["window_remaining_after"],
+        "tick_balance": result["tick_balance_after"],
+    }
+
+
+@router.post("/tick/sell-window")
+async def sell_tick_window(
+    req: SellTick,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(20, 60, "market")),
+):
+    """Vende $TICK GANADO por USDT con fee del 20%, usando la
+    ventana mensual (proceso aparte, decisión 2026-11-27).
+
+    Solo vende ganado, hasta lo que queda de ventana (500/mes). El
+    comprado NO se vende aquí: se vende libre por la venta normal
+    (POST /api/market/tick/sell). No toca el tope diario. El débito
+    y el contador de la ventana se actualizan en una sola operación
+    atómica (apply_window_sale)."""
+    if req.tick_amount < 10:
+        raise HTTPException(status_code=400, detail="Mínimo 10 $TICK")
+    db = get_db()
+    usdt_received = round(req.tick_amount * settings.TICK_SELL_RATE, 2)
+    try:
+        result = await apply_window_sale(db, wallet, req.tick_amount,
+                                         usdt_received)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info(
+        "market tick/sell-window wallet=%s tick=-%d usdt=+%.2f "
+        "(ventana=%d restante=%d)",
+        wallet, req.tick_amount, usdt_received,
+        result["from_earned_window"], result["window_remaining_after"],
+    )
+    return {
+        "usdt_received": usdt_received,
+        "tick_sold": req.tick_amount,
+        "sold_from_earned_window": result["from_earned_window"],
         "window_remaining": result["window_remaining_after"],
         "tick_balance": result["tick_balance_after"],
     }
