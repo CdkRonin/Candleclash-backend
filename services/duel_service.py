@@ -37,6 +37,7 @@ from services.battle_service import (
 )
 from services.energy_service import compute_energy, refresh_energy
 from services.oracle_service import OracleService
+from services.tick_service import ensure_tick_split
 from config import ability_for_race
 from database import get_db
 
@@ -405,10 +406,13 @@ async def _apply_duel_rewards(db, duel: dict) -> dict:
     el resumen de recompensas."""
     wallet = duel["player_wallet"]
     rewards = battle_rewards(duel["winner"])
+    # El $TICK del duelo es ganado, igual que en la batalla automática.
+    await ensure_tick_split(db, wallet)
     await db.users.update_one(
         {"wallet_address": wallet},
         {"$inc": {
             "tick_balance": rewards["tick"],
+            "tick_earned": rewards["tick"],
             "trophies": rewards["trophies"],
             "wins": rewards["wins"],
             "losses": rewards["losses"],
