@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import asyncio
 
 from database import connect_db, close_db
-from routers import auth, gladiators, battle, forge, market, oracle, missions
+from routers import auth, gladiators, battle, coliseum, forge, market, oracle, missions
 from services.oracle_service import OracleService
 from config import settings
 
@@ -44,6 +44,7 @@ app.add_middleware(
 app.include_router(auth.router,       prefix="/api/auth",       tags=["Auth"])
 app.include_router(gladiators.router, prefix="/api/gladiators", tags=["Gladiadores"])
 app.include_router(battle.router,     prefix="/api/battle",     tags=["Batalla"])
+app.include_router(coliseum.router,   prefix="/api/battle/coliseum", tags=["Coliseo"])
 app.include_router(forge.router,      prefix="/api/forge",      tags=["Forja"])
 app.include_router(market.router,     prefix="/api/market",     tags=["Mercado"])
 app.include_router(missions.router,   prefix="/api/missions",   tags=["Misiones"])
