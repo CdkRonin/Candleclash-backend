@@ -89,6 +89,12 @@ async def get_or_create_user(wallet_address: str) -> dict:
         user = {
             "wallet_address": wallet,
             "tick_balance":   0,
+            "tick_bought":    0,     # $TICK comprado con USDT (venta libre)
+            "tick_earned":    0,     # $TICK ganado jugando (tope diario + ventana)
+            "tick_earned_sold_day":   None,
+            "tick_earned_sold_today": 0,
+            "tick_window_month":      None,
+            "tick_window_used":       0,
             "usdt_balance":   0,
             "trophies":       0,
             "league":         "Liga Bronce",
