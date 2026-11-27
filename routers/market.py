@@ -225,6 +225,70 @@ async def buy_nft(
     return {"success": True, "paid": listing["price_usdt"], "platform_fee": platform_fee}
 
 
+@router.delete("/listings/{listing_id}")
+async def cancel_listing(
+    listing_id: str,
+    wallet: str = Depends(get_current_user),
+    _limit=Depends(wallet_rate_limit(20, 60, "market")),
+):
+    """Cancela un anuncio propio.
+
+    Solo el vendedor puede cancelar su anuncio (otro usuario recibe
+    403). La cancelación es ATÓMICA: find_one_and_update con filtro
+    _id + seller_wallet + status=active → cancelled; dos
+    cancelaciones simultáneas (o una compra simultánea) solo pasan
+    una vez, la otra recibe 409 porque el anuncio ya no está activo.
+    El NFT vuelve a quedar sin listar (is_listed=False) para que se
+    pueda vender de nuevo o usar en batalla/forja.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+    db = get_db()
+    try:
+        oid = ObjectId(listing_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=404, detail="Listing no encontrado")
+
+    listing = await db.market_listings.find_one({"_id": oid})
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing no encontrado")
+    if listing["seller_wallet"] != wallet:
+        raise HTTPException(status_code=403, detail="Solo puedes cancelar tus propios anuncios")
+    if listing["status"] != "active":
+        raise HTTPException(status_code=409, detail="El anuncio ya no está activo")
+
+    cancelled = await db.market_listings.find_one_and_update(
+        {"_id": oid, "seller_wallet": wallet, "status": "active"},
+        {"$set": {"status": "cancelled", "cancelled_at": datetime.utcnow()}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not cancelled:
+        # Perdió la carrera (compra o cancelación simultánea): re-leer
+        # para devolver el error correcto.
+        current = await db.market_listings.find_one({"_id": oid})
+        if not current or current["status"] != "active":
+            raise HTTPException(status_code=409, detail="El anuncio ya no está activo")
+        raise HTTPException(status_code=404, detail="Listing no encontrado")
+
+    # El NFT vuelve a estar disponible (no listado).
+    unmarked = await db.gladiators.update_one(
+        {"token_id": cancelled["gladiator_id"],
+         "owner_wallet": wallet, "is_listed": True},
+        {"$set": {"is_listed": False}},
+    )
+    if unmarked.modified_count == 0:
+        logger.warning(
+            "market cancel: no se pudo desmarcar is_listed del NFT %s "
+            "listing=%s", cancelled["gladiator_id"], listing_id,
+        )
+
+    logger.info(
+        "market cancel vendedor=%s gladiador=%s listing=%s",
+        wallet, cancelled["gladiator_id"], listing_id,
+    )
+    return {"success": True, "listing_id": listing_id, "status": "cancelled"}
+
+
 @router.post("/tick/buy")
 async def buy_tick(
     req: BuyTick,
