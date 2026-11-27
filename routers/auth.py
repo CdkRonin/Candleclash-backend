@@ -10,6 +10,9 @@ from services.auth_service import (
 )
 from services.energy_service import refresh_energy
 from services.rate_limit import ip_rate_limit, wallet_ip_rate_limit
+from services.tick_service import (
+    ensure_tick_split, split_tick, limits_remaining,
+)
 from database import get_db
 
 logger = logging.getLogger(__name__)
@@ -99,11 +102,21 @@ async def login(
 @router.get("/me")
 async def get_me(wallet: str = Depends(get_current_user)):
     """Retorna el perfil del usuario autenticado, con su energía
-    actualizada (regeneración calculada al leer)."""
+    actualizada (regeneración calculada al leer) y la separación
+    $TICK comprado vs ganado con sus límites de venta
+    (ver services/tick_service.py)."""
     db = get_db()
     user = await db.users.find_one({"wallet_address": wallet}, {"_id": 0, "nonce": 0})
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    # Backfill perezoso en BD para usuarios viejos (una sola vez).
+    user = await ensure_tick_split(db, wallet, user)
+    bought, earned = split_tick(user)
+    lim = limits_remaining(user)
+    user["tick_bought"] = bought
+    user["tick_earned"] = earned
+    user["earned_daily_remaining"] = lim["earned_daily_remaining"]
+    user["window_remaining"] = lim["window_remaining"]
     energy = await refresh_energy(db, wallet)
     user["energy"] = energy["energy"]
     user["energy_next_in_min"] = energy["minutes_to_next"]
