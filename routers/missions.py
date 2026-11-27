@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from pymongo.errors import DuplicateKeyError
 from routers.auth import get_current_user
 from services.rate_limit import wallet_rate_limit
+from services.tick_service import ensure_tick_split
 from database import get_db
 from config import settings
 
@@ -140,9 +141,11 @@ async def claim_mission(
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="Ya reclamaste esta misión hoy")
 
+    await ensure_tick_split(db, wallet)
     await db.users.update_one(
         {"wallet_address": wallet},
-        {"$inc": {"tick_balance": m["reward"]}},
+        {"$inc": {"tick_balance": m["reward"],
+                  "tick_earned": m["reward"]}},
     )
     logger.info(
         "missions claim wallet=%s mision=%s tick=+%d fecha=%s",
