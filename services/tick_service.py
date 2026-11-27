@@ -238,3 +238,58 @@ async def apply_sale(db, wallet: str, amount: int,
         # Otra operación concurrente cambió el saldo: reintentar
         # con valores frescos.
     raise ValueError("No se pudo completar la venta, reintenta")
+
+
+async def charge_tick(db, wallet: str, cost: int):
+    """Cobra `cost` $TICK del saldo total, gastando primero el ganado
+    y luego el comprado (misma regla para forja, duelo con entrada y
+    coliseo: una sola implementación, sin duplicar la regla).
+
+    Devuelve {"from_earned": int, "from_bought": int} si cobró, o
+    None si no hay saldo. La actualización es condicional: el filtro
+    revalida saldo y separación leídos, así que dos cobros
+    simultáneos no pueden gastar el mismo $TICK dos veces; se
+    reintenta hasta 3 veces y luego devuelve None (igual que saldo
+    insuficiente, el llamador revierte su operación).
+    """
+    for _ in range(3):
+        user = await db.users.find_one({"wallet_address": wallet})
+        if not user:
+            return None
+        if user.get("tick_bought") is None or user.get("tick_earned") is None:
+            user = await ensure_tick_split(db, wallet, user)
+        balance = int(user.get("tick_balance", 0))
+        if balance < cost:
+            return None
+        bought, earned = split_tick(user)
+        from_earned = min(cost, earned)
+        from_bought = cost - from_earned
+        res = await db.users.update_one(
+            {"wallet_address": wallet,
+             "tick_balance": balance,
+             "tick_bought": bought,
+             "tick_earned": earned},
+            {"$inc": {"tick_balance": -cost,
+                      "tick_earned": -from_earned,
+                      "tick_bought": -from_bought}},
+        )
+        if res.modified_count == 1:
+            return {"from_earned": from_earned, "from_bought": from_bought}
+    return None
+
+
+async def refund_tick(db, wallet: str, from_earned: int, from_bought: int):
+    """Devuelve $TICK cobrado antes, a los mismos cubos de los que
+    salió (para compensar un cobro cuando la operación posterior
+    falla, p. ej. no se pudo crear el duelo o el coliseo se llenó
+    entre el cobro y la inscripción). Suma simple: no puede fallar
+    por saldo insuficiente."""
+    total = int(from_earned) + int(from_bought)
+    if total <= 0:
+        return
+    await db.users.update_one(
+        {"wallet_address": wallet},
+        {"$inc": {"tick_balance": total,
+                  "tick_earned": int(from_earned),
+                  "tick_bought": int(from_bought)}},
+    )
