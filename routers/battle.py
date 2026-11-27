@@ -15,6 +15,7 @@ class BattleRequest(BaseModel):
 
 class DuelStartRequest(BaseModel):
     gladiator_id: str   # token_id del NFT que peleará
+    paid: bool = False  # Duelo con entrada: 10 $TICK, ganador 18
 
 
 class DuelActRequest(BaseModel):
@@ -67,9 +68,15 @@ async def duel_start(
     Cuesta 1 energía, como la batalla automática. Sin energía responde
     403. Devuelve el estado inicial del duelo y el oponente.
     Límite: 5/min por wallet.
+
+    Con paid=true es un duelo con entrada (decisión 2026-11-26):
+    cobra 10 $TICK al empezar (sin saldo responde 400 y no se crea
+    nada); si ganas recibes 18 $TICK, si empatas se te devuelven los
+    10 y si pierdes no recibes nada. El premio sustituye al premio de
+    batalla de 8–30 (no se suma).
     """
     try:
-        return await start_duel(wallet, req.gladiator_id)
+        return await start_duel(wallet, req.gladiator_id, paid=req.paid)
     except NoEnergyError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
