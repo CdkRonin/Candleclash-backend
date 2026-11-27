@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from pymongo import ReturnDocument
 from routers.auth import get_current_user
 from services.rate_limit import wallet_rate_limit
+from services.tick_service import apply_sale, ensure_tick_split
 from database import get_db
 from config import (
     settings,
@@ -297,21 +298,24 @@ async def buy_tick(
 ):
     """Compra $TICK con USDT a precio fijo. El cobro es condicional
     (saldo >= importe): dos compras simultáneas no pueden gastar el
-    mismo USDT dos veces."""
+    mismo USDT dos veces. El $TICK comprado va a `tick_bought`:
+    se vende libre, sin tope (ver services/tick_service.py)."""
     if req.usdt_amount < 0.10:
         raise HTTPException(status_code=400, detail="Mínimo 0.10 USDT")
     db = get_db()
     tick_received = int(req.usdt_amount * settings.TICK_BUY_RATE)
+    await ensure_tick_split(db, wallet)
     res = await db.users.update_one(
         {"wallet_address": wallet,
          "usdt_balance": {"$gte": req.usdt_amount}},
         {"$inc": {"usdt_balance": -req.usdt_amount,
-                  "tick_balance": tick_received}},
+                  "tick_balance": tick_received,
+                  "tick_bought": tick_received}},
     )
     if res.modified_count == 0:
         raise HTTPException(status_code=400, detail="Saldo USDT insuficiente")
     logger.info(
-        "market tick/buy wallet=%s usdt=%.2f tick=+%d",
+        "market tick/buy wallet=%s usdt=%.2f tick=+%d (comprado)",
         wallet, req.usdt_amount, tick_received,
     )
     return {"tick_received": tick_received, "usdt_spent": req.usdt_amount}
@@ -323,25 +327,39 @@ async def sell_tick(
     wallet: str = Depends(get_current_user),
     _limit=Depends(wallet_rate_limit(20, 60, "market")),
 ):
-    """Vende $TICK por USDT con fee del 20%. La venta es condicional
-    (saldo $TICK >= cantidad), igual que la compra."""
+    """Vende $TICK por USDT con fee del 20%.
+
+    El comprado se vende libre, sin tope. El ganado tiene tope diario
+    de 17/día y una ventana mensual de 500 que cubre el exceso
+    (ver services/tick_service.py). Si ni el día ni la ventana
+    alcanzan, se rechaza TODA la venta con 400 y el mensaje dice
+    cuánto se puede vender. El débito y los contadores se actualizan
+    en una sola operación atómica (apply_sale)."""
     if req.tick_amount < 10:
         raise HTTPException(status_code=400, detail="Mínimo 10 $TICK")
     db = get_db()
     usdt_received = round(req.tick_amount * settings.TICK_SELL_RATE, 2)
-    res = await db.users.update_one(
-        {"wallet_address": wallet,
-         "tick_balance": {"$gte": req.tick_amount}},
-        {"$inc": {"tick_balance": -req.tick_amount,
-                  "usdt_balance": usdt_received}},
-    )
-    if res.modified_count == 0:
-        raise HTTPException(status_code=400, detail="Saldo $TICK insuficiente")
+    try:
+        result = await apply_sale(db, wallet, req.tick_amount, usdt_received)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     logger.info(
-        "market tick/sell wallet=%s tick=-%d usdt=+%.2f",
+        "market tick/sell wallet=%s tick=-%d usdt=+%.2f "
+        "(comprado=%d diario=%d ventana=%d)",
         wallet, req.tick_amount, usdt_received,
+        result["from_bought"], result["from_earned_daily"],
+        result["from_earned_window"],
     )
-    return {"usdt_received": usdt_received, "tick_sold": req.tick_amount}
+    return {
+        "usdt_received": usdt_received,
+        "tick_sold": req.tick_amount,
+        "sold_from_bought": result["from_bought"],
+        "sold_from_earned_daily": result["from_earned_daily"],
+        "sold_from_earned_window": result["from_earned_window"],
+        "earned_daily_remaining": result["earned_daily_remaining_after"],
+        "window_remaining": result["window_remaining_after"],
+        "tick_balance": result["tick_balance_after"],
+    }
 
 
 @router.post("/packs/recluta")
@@ -370,6 +388,10 @@ async def claim_starter_pack(
     )
     if not user:
         raise HTTPException(status_code=403, detail="Ya reclamaste el Paquete Recluta")
+
+    # El bonus de 100 $TICK es ganado (ver services/tick_service.py):
+    # se acredita a tick_earned, no a tick_bought.
+    user = await ensure_tick_split(db, wallet.lower(), user)
 
     created_ids = []
     try:
@@ -421,7 +443,8 @@ async def claim_starter_pack(
 
         await db.users.update_one(
             {"wallet_address": wallet.lower()},
-            {"$inc": {"tick_balance": settings.PACK_RECLUTA_TICK_BONUS}},
+            {"$inc": {"tick_balance": settings.PACK_RECLUTA_TICK_BONUS,
+                      "tick_earned": settings.PACK_RECLUTA_TICK_BONUS}},
         )
     except Exception:
         # Si algo falló a mitad: devolver el reclamo para no dejar al
