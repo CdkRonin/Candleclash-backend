@@ -37,8 +37,9 @@ from services.battle_service import (
 )
 from services.energy_service import compute_energy, refresh_energy
 from services.oracle_service import OracleService
-from services.tick_service import ensure_tick_split
-from config import ability_for_race
+from services.tick_service import charge_tick, ensure_tick_split, refund_tick
+from services.coliseum_service import record_win
+from config import ability_for_race, settings
 from database import get_db
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,9 @@ def public_duel(duel: dict, round_log: list = None) -> dict:
         "status": duel["status"],
         "round": duel["round"],
         "winner": duel.get("winner"),
+        "paid": duel.get("paid", False),
+        "entry_tick": duel.get("entry_tick", 0),
+        "prize_tick": duel.get("prize_tick", 0),
         "p1": _public_fighter(duel["p1"]),
         "p2": _public_fighter(duel["p2"]),
         "opponent": duel["opponent"],
@@ -328,10 +332,16 @@ def _validate_action(st: dict, action: str):
         raise ValueError("No hay nada que curar: la vida está llena.")
 
 
-async def start_duel(player_wallet: str, gladiator_id: str) -> dict:
+async def start_duel(player_wallet: str, gladiator_id: str,
+                   paid: bool = False) -> dict:
     """Crea un duelo táctico: carga el gladiador, genera un oponente
     calibrado como en la batalla automática y cobra 1 energía al
-    empezar (si no hay energía, no se crea nada)."""
+    empezar (si no hay energía, no se crea nada).
+
+    Duelo con entrada (paid=True, decisión 2026-11-26): cobra además
+    10 $TICK al empezar (ganado primero, igual que la forja). Si no
+    hay saldo, no se crea nada. Si la creación falla tras el cobro,
+    la entrada se devuelve."""
     db = get_db()
     oracle_mults = OracleService.get_cached_multipliers()
     nft_doc = await db.gladiators.find_one({
@@ -361,6 +371,13 @@ async def start_duel(player_wallet: str, gladiator_id: str) -> dict:
         raise NoEnergyError(
             f"Sin energía. Próxima energía en {state['minutes_to_next']} min."
         )
+    entry = settings.DUEL_ENTRY_TICK if paid else 0
+    charged = None
+    if paid:
+        charged = await charge_tick(db, player_wallet.lower(), entry)
+        if charged is None:
+            raise ValueError(
+                f"Necesitas {entry} $TICK para entrar al duelo con entrada")
     post_state = compute_energy({
         "energy": energy_state["energy"] - 1,
         "energy_updated_at": energy_state["energy_updated_at"],
@@ -373,6 +390,11 @@ async def start_duel(player_wallet: str, gladiator_id: str) -> dict:
         "status": "active",
         "round": 1,
         "winner": None,
+        "paid": paid,
+        "entry_tick": entry,
+        "entry_from_earned": charged["from_earned"] if charged else 0,
+        "entry_from_bought": charged["from_bought"] if charged else 0,
+        "prize_tick": settings.DUEL_WIN_PRIZE_TICK if paid else 0,
         "p1": _fighter_state(p1_stats, True),
         "p2": _fighter_state(p2_stats, False),
         "opponent": {
@@ -391,9 +413,16 @@ async def start_duel(player_wallet: str, gladiator_id: str) -> dict:
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
     }
-    await db.duels.insert_one(duel)
-    logger.info("duelo %s creado wallet=%s gladiador=%s",
-                duel["duel_id"], player_wallet.lower(), gladiator_id)
+    try:
+        await db.duels.insert_one(duel)
+    except Exception:
+        # No se pudo crear el duelo: devolver la entrada cobrada.
+        if charged is not None:
+            await refund_tick(db, player_wallet.lower(),
+                              charged["from_earned"], charged["from_bought"])
+        raise
+    logger.info("duelo %s creado wallet=%s gladiador=%s pagado=%s",
+                duel["duel_id"], player_wallet.lower(), gladiator_id, paid)
     out = public_duel(duel)
     out["energy"] = post_state["energy"]
     out["energy_next_in_min"] = post_state["minutes_to_next"]
@@ -403,25 +432,62 @@ async def start_duel(player_wallet: str, gladiator_id: str) -> dict:
 async def _apply_duel_rewards(db, duel: dict) -> dict:
     """Recompensas al terminar el duelo: mismas que la batalla
     automática (ver battle_rewards) y piso de trofeos en 0. Devuelve
-    el resumen de recompensas."""
+    el resumen de recompensas.
+
+    Duelo con entrada (decisión 2026-11-26): el $TICK de batalla se
+    sustituye por el premio — victoria +18, derrota 0, empate devuelve
+    la entrada (10) a los mismos cubos de los que salió. Los trofeos
+    y la XP siguen siendo los de battle_rewards (el duelo sigue
+    contando como batalla). El premio es $TICK ganado.
+    Cada victoria en duelo táctico suma 1 punto en el coliseo activo
+    si el jugador está inscrito (mismo paso que las recompensas, que
+    corre una sola vez por duelo gracias a la concurrencia optimista
+    de act_duel: el punto no se acredita dos veces)."""
     wallet = duel["player_wallet"]
     rewards = battle_rewards(duel["winner"])
+    paid = duel.get("paid", False)
+    if paid:
+        if duel["winner"] == "p1":
+            tick = duel.get("prize_tick", settings.DUEL_WIN_PRIZE_TICK)
+            entry_refunded = 0
+        elif duel["winner"] == "draw":
+            tick = 0
+            entry_refunded = duel.get("entry_tick", 0)
+        else:
+            tick = 0
+            entry_refunded = 0
+    else:
+        tick = rewards["tick"]
+        entry_refunded = 0
     # El $TICK del duelo es ganado, igual que en la batalla automática.
+    # En empate pagado, la entrada se devuelve a los mismos cubos de
+    # los que salió (entry_from_earned / entry_from_bought del duelo).
     await ensure_tick_split(db, wallet)
+    refund_earned = duel.get("entry_from_earned", 0) if entry_refunded else 0
+    refund_bought = duel.get("entry_from_bought", 0) if entry_refunded else 0
     await db.users.update_one(
         {"wallet_address": wallet},
         {"$inc": {
-            "tick_balance": rewards["tick"],
-            "tick_earned": rewards["tick"],
+            "tick_balance": tick + entry_refunded,
+            "tick_earned": tick + refund_earned,
+            "tick_bought": refund_bought,
             "trophies": rewards["trophies"],
             "wins": rewards["wins"],
             "losses": rewards["losses"],
         }},
     )
+    # Piso de trofeos en 0 (arreglo 2026-11-26): segunda actualización
+    # porque $inc y $max no pueden tocar el mismo campo en una sola.
     await db.users.update_one(
         {"wallet_address": wallet},
         {"$max": {"trophies": 0}},
     )
+    if duel["winner"] == "p1":
+        try:
+            await record_win(db, wallet)
+        except Exception as e:
+            logger.warning("duelo: no se pudo sumar el punto del "
+                           "coliseo wallet=%s: %s", wallet, e)
     # XP del gladiador, releyendo sus valores justo antes (igual que
     # en run_battle, para no pisar una forja simultánea).
     fresh = await db.gladiators.find_one({
@@ -446,12 +512,19 @@ async def _apply_duel_rewards(db, duel: dict) -> dict:
                       "updated_at": datetime.utcnow()}},
         )
     summary = {
-        "tick_reward": rewards["tick"],
+        # tick_reward es el $TICK neto acreditado: en duelo pagado es
+        # el premio (18) o la devolución del empate (10), no el premio
+        # de batalla de 8–30 (que se sustituye, no se suma).
+        "tick_reward": tick + entry_refunded,
         "xp_gained": rewards["xp"],
         "trophies_delta": rewards["trophies"],
         "level_after": new_level,
         "leveled_up": new_level is not None and new_level > fresh["level"]
         if fresh else False,
+        "paid": paid,
+        "entry_tick": duel.get("entry_tick", 0),
+        "prize_tick": tick if paid and duel["winner"] == "p1" else 0,
+        "entry_refunded": entry_refunded,
     }
     try:
         await db.battles.insert_one({
@@ -463,7 +536,7 @@ async def _apply_duel_rewards(db, duel: dict) -> dict:
             "mode": "duel",
             "result": {"winner": duel["winner"]},
             "log": duel["log"],
-            "tick_reward": rewards["tick"],
+            "tick_reward": tick + entry_refunded,
             "xp_gained": rewards["xp"],
             "level_after": new_level,
             "timestamp": datetime.utcnow(),
