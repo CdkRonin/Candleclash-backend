@@ -34,6 +34,24 @@ class Settings(BaseSettings):
     FORGE_ASCEND_COST: int = 50     # $TICK para ascender rareza
     FORGE_FEED_COST: int = 0        # Gratis alimentar (solo NFT sacrificio)
     REBIRTH_COST: int = 100         # $TICK para renacimiento
+    # Duelo táctico con entrada (decisión 2026-11-26): el jugador paga
+    # 10 $TICK; si gana recibe 18 (pozo conceptual de 20, la casa se
+    # queda 2 = 10%); si empata se le devuelven los 10; si pierde, 0.
+    DUEL_ENTRY_TICK: int = 10       # Entrada del duelo con premio
+    DUEL_WIN_PRIZE_TICK: int = 18   # Premio al ganador del duelo pagado
+    # Coliseo táctico (decisión 2026-11-26): evento de 24 h, cupo 50,
+    # entrada 10 $TICK, premio al top 10. La casa se queda el 10% del
+    # pozo; el resto se reparte con las fracciones exactas de abajo
+    # (para 50 jugadores el pozo de premios es 450 y da
+    # 120/80/60/50/40/30/20/20/20/10).
+    COLISEUM_DURATION_SECONDS: int = 86400  # 24 h por evento
+    COLISEUM_MAX_PLAYERS: int = 50
+    COLISEUM_ENTRY_TICK: int = 10
+    COLISEUM_HOUSE_PCT: float = 0.10
+    COLISEUM_PRIZE_SHARES: list = [
+        (4, 15), (8, 45), (2, 15), (1, 9), (4, 45),
+        (1, 15), (2, 45), (2, 45), (2, 45), (1, 45),
+    ]
     MARKET_FEE_PCT: float = 0.05    # 5% plataforma en ventas P2P
 
     # Paquete Recluta (primera vez, 1 por cuenta): 5 NFTs + 100 $TICK,
